@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-reader/
+.angular/
+.env
+*.log
+
+# Uploaded documents and real sample PDFs contain patient data — never commit them.
+backend/storage/
+backend/storage-test/
+backend/test-fixtures/
+
+# Generated extension signing key
+extension/key.pem
+
+# The client package (Node.js + PostgreSQL + app), assembled by package/build-package.js
+release/

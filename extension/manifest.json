@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "FillPilot — PDF to web form",
+  "short_name": "FillPilot",
+  "version": "0.2.0",
+  "description": "Fills web forms from your PDF documents and hospital bills — you review every value, and it never submits a form.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArI2mKvfKwuFIFjNkN9apbD5FCvsTp7Gnw+bUicJQU9+ZjkhWcVKGKDcxrRn4mreZpMCZz491WcDKLXWX1vCDASYTEd3qpcGQthiJQpEfT/uvuitmm5nRSXp5Ld8f7xACjHhAa8HkUmdTkMki9Yqhp2TmfWqOY6wAufRLQB1kiiYbKbhPbkqiqaEDm1zXBqWr88vTxNY3VPMl8bY694+m9MH5kxNnv0ySvd+ZvYO2yxc77r2Q1CNs+gtxttKlJWGGsBAWFcJvfp6akuZddqut/anjGA8fEfVvmGgOD4PknUojI8pRlkDk+/GoOiFTGTe0aOeoC1q2fHjJ/UEalLAm9QIDAQAB",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": ["sidePanel", "storage", "scripting"],
+  "host_permissions": ["__API_ORIGIN__/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": { "service_worker": "service-worker.js" },
+  "side_panel": { "default_path": "panel/index.html" },
+  "action": {
+    "default_title": "FillPilot",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' __API_ORIGIN__"
+  }
+}

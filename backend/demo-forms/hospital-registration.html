@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Patient Registration — Demo Hospital (synthetic test form)</title>
+  <link rel="stylesheet" href="demo.css">
+</head>
+<body>
+  <!-- SYNTHETIC TEST TARGET. Labels deliberately differ from the PDFs' wording
+       ("Name of Patient" vs "Policyholder", "Contact Number" vs "Mobile"). -->
+  <header><h1>Demo Hospital — Patient Registration</h1><p class="note">Synthetic form for testing PDF Form Assistant. Not a real system.</p></header>
+  <form id="demo-form" autocomplete="off">
+    <fieldset>
+      <legend>Patient details</legend>
+      <div class="row"><label for="patientName">Name of Patient *</label><input id="patientName" name="patientName" type="text" required></div>
+      <div class="row"><label for="uhid">UHID</label><input id="uhid" name="uhid" type="text" maxlength="20"></div>
+      <div class="row"><label for="dob">Date of Birth</label><input id="dob" name="dob" type="date"></div>
+      <div class="row"><label for="sex">Sex</label>
+        <select id="sex" name="sex">
+          <option value="">-- Select --</option>
+          <option value="M">Male</option>
+          <option value="F">Female</option>
+          <option value="O">Other</option>
+        </select>
+      </div>
+      <div class="row"><label for="contact">Contact Number</label><input id="contact" name="contact" type="tel" maxlength="10"></div>
+      <div class="row"><label for="email">Email Address</label><input id="email" name="email" type="email"></div>
+      <div class="row"><label for="address">Residential Address</label><textarea id="address" name="address" rows="3"></textarea></div>
+      <div class="row"><label for="pin">Pin Code</label><input id="pin" name="pin" type="text" maxlength="6"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Insurance</legend>
+      <div class="row"><label for="policyNo">Policy No</label><input id="policyNo" name="policyNo" type="text"></div>
+      <div class="row"><label for="insurer">Insurance Company</label><input id="insurer" name="insurer" type="text"></div>
+      <div class="row"><label for="sumInsured">Sum Insured</label><input id="sumInsured" name="sumInsured" type="number"></div>
+      <div class="row"><label for="emergency">Emergency Contact</label><input id="emergency" name="emergency" type="text"></div>
+    </fieldset>
+    <div class="row"><label for="password">Portal password</label><input id="password" name="password" type="password"></div>
+    <button type="submit">Register patient</button>
+  </form>
+  <pre id="submitted" hidden></pre>
+  <script src="demo.js"></script>
+</body>
+</html>

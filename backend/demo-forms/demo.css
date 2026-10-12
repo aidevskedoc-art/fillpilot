@@ -1,0 +1,13 @@
+body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 760px; padding: 16px; color: #1f2933; background: #fff; }
+header { border-bottom: 2px solid #3e7cb1; margin-bottom: 16px; }
+.note { color: #8a5a00; background: #fff4d6; padding: 6px 10px; border-radius: 4px; font-size: 13px; }
+fieldset { border: 1px solid #cfd8e3; border-radius: 6px; margin: 0 0 16px; padding: 12px 16px; }
+.row { display: grid; grid-template-columns: 200px 1fr; gap: 12px; align-items: center; margin: 8px 0; }
+.grid { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+.grid td { padding: 6px 8px; border-bottom: 1px solid #e4e9f0; }
+.grid td:first-child { width: 220px; color: #3d4b5c; }
+input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid #b8c4d2; border-radius: 4px; width: 100%; box-sizing: border-box; }
+input[type=radio] { width: auto; }
+button { font: inherit; padding: 8px 18px; background: #3e7cb1; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
+pre { background: #f4f6f9; padding: 10px; border-radius: 4px; font-size: 12px; white-space: pre-wrap; }
+@media (max-width: 560px) { .row { grid-template-columns: 1fr; gap: 4px; } }

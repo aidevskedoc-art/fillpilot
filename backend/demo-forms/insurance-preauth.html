@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cashless Pre-authorisation — Demo TPA (synthetic test form)</title>
+  <link rel="stylesheet" href="demo.css">
+</head>
+<body>
+  <!-- SYNTHETIC TEST TARGET exercising the hard cases:
+       - labels only in aria-label / placeholder / a neighbouring table cell
+       - a gender select WITHOUT "Male" (must say "No matching option", never guess)
+       - three address fields for one PDF address (must ask the user)
+       - a text date field with a visible DD/MM/YYYY format
+       - "controlled" inputs: the page keeps its own state and only learns a value
+         through input/change events, like React/Angular forms -->
+  <header><h1>Demo TPA — Cashless Pre-authorisation</h1><p class="note">Synthetic form for testing PDF Form Assistant. Not a real system.</p></header>
+  <form id="demo-form" autocomplete="off" data-controlled="true">
+    <table class="grid">
+      <tr><td>Insured Person Name</td><td><input type="text" name="insured_name" aria-label="Insured Person Name"></td></tr>
+      <tr><td>Policy Number</td><td><input type="text" name="pol_num" placeholder="Policy Number"></td></tr>
+      <tr><td>DOB</td><td><input type="text" name="dob_text" placeholder="DD/MM/YYYY"></td></tr>
+      <tr><td>Gender</td><td>
+        <select name="gender">
+          <option value="">Select</option>
+          <option value="F">Female</option>
+          <option value="T">Transgender</option>
+        </select>
+      </td></tr>
+      <tr><td>Current Address</td><td><textarea name="addr_current" rows="2"></textarea></td></tr>
+      <tr><td>Permanent Address</td><td><textarea name="addr_permanent" rows="2"></textarea></td></tr>
+      <tr><td>Communication Address</td><td><textarea name="addr_comm" rows="2"></textarea></td></tr>
+      <tr><td>Sum Insured (₹)</td><td><input type="number" name="si_amount"></td></tr>
+      <tr><td>Policy Start Date</td><td><input type="date" name="start_date"></td></tr>
+      <tr><td>Policy End Date</td><td><input type="date" name="end_date"></td></tr>
+      <tr><td>Mobile No.</td><td><input type="tel" name="mob"></td></tr>
+    </table>
+    <fieldset>
+      <legend>Policy Type</legend>
+      <label><input type="radio" name="policy_type" value="IND"> Individual</label>
+      <label><input type="radio" name="policy_type" value="FLT"> Floater</label>
+    </fieldset>
+    <button type="submit">Submit pre-auth request</button>
+  </form>
+  <pre id="state"></pre>
+  <pre id="submitted" hidden></pre>
+  <script src="demo.js"></script>
+</body>
+</html>

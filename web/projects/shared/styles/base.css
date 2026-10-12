@@ -1,0 +1,48 @@
+/* Shared base for the dashboard and the extension panel.
+   Layer order: PrimeNG first, Tailwind utilities last so a utility class always
+   wins over a component default. Tailwind's preflight is deliberately not
+   imported — it fights PrimeNG's component styles. */
+@layer primeng, tailwind-base, tailwind-utilities;
+@import 'tailwindcss/theme.css' layer(tailwind-base);
+@import 'tailwindcss/utilities.css' layer(tailwind-utilities);
+@import 'primeicons/primeicons.css';
+
+/* Colours come from PrimeNG's tokens, so light/dark follow the OS everywhere. */
+:root {
+  --app-bg: var(--p-surface-50);
+  --app-card: var(--p-surface-0);
+  --app-border: var(--p-surface-200);
+  --app-text: var(--p-surface-900);
+  --app-muted: var(--p-surface-500);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --app-bg: var(--p-surface-950);
+    --app-card: var(--p-surface-900);
+    --app-border: var(--p-surface-700);
+    --app-text: var(--p-surface-0);
+    --app-muted: var(--p-surface-400);
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--app-text);
+  background: var(--app-bg);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+a { color: var(--p-primary-color); }
+
+.card {
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+}
+.muted { color: var(--app-muted); }
+.mono { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12.5px; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
