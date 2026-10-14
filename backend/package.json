@@ -13,6 +13,7 @@
     "test-kv-extractor": "node scripts/test-kv-extractor.js",
     "test-matcher": "node scripts/test-matcher.js",
     "test-yashoda": "node scripts/test-yashoda.js",
+    "bill-accuracy": "node scripts/bill-accuracy.js",
     "test-unit": "node scripts/test-normalize.js && node scripts/test-kv-extractor.js && node scripts/test-matcher.js && node scripts/test-yashoda.js",
     "test-routes": "node --env-file=.env scripts/test-routes.js"
   },

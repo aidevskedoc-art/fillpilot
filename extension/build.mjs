@@ -3,7 +3,8 @@
 //   panel/panel.js                  (React side panel, src/panel/index.tsx)
 //   panel/index.html, panel.css     (copied from src/panel/)
 //   icons/icon-*.png                (copied from icons/; redraw them with icons/make-icons.cjs)
-//   panel/config.json               ({ apiBase } read by the panel at startup)
+//   panel/config.json               ({ apiBase } read by the panel at startup; the panel's
+//                                    settings can point an installed copy at another server)
 //   manifest.json                   (__API_ORIGIN__ filled from API_BASE)
 //
 //   API_BASE=https://forms-api.example.com node build.mjs   (default http://localhost:4100)

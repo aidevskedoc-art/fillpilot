@@ -5,10 +5,14 @@ import { confidenceSeverity, pct } from '../../../web/projects/shared/src/format
 import { api, messageOf } from './api';
 import { ActiveTab, bridge } from './page-bridge';
 import { ReviewRow, toRow } from './review-model';
-import { BoltIcon, LogOutIcon, MoonIcon, RefreshIcon, ScanIcon, ShieldIcon, SunIcon } from './Icons';
+import { GuideOverlay } from './Guide';
+import { BoltIcon, InfoIcon, LogOutIcon, MoonIcon, RefreshIcon, ScanIcon, SettingsIcon, ShieldIcon, SunIcon } from './Icons';
 import { Logo } from './Logo';
+import { Settings } from './Settings';
 import { TgnpdclView } from './TgnpdclView';
 import { isTgnpdclBillPage } from './tgnpdcl-plan';
+import { PmjayView } from './PmjayView';
+import { isPmjayPage } from './pmjay-plan';
 import { Theme, applyTheme, savedTheme } from './theme';
 import { UploadPdfs } from './UploadPdfs';
 
@@ -30,6 +34,10 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [summary, setSummary] = useState<{ filled: number; failed: number } | null>(null);
   const descriptors = useRef(new Map<string, FieldDescriptor>());
   const [theme, setTheme] = useState<Theme>(savedTheme);
+  const [settings, setSettings] = useState(false);
+  const [guide, setGuide] = useState(false);
+  const [copied, setCopied] = useState('');
+  const closeGuide = useCallback(() => setGuide(false), []);
 
   const toggleTheme = () => {
     const next: Theme = theme === 'dark' ? 'light' : 'dark';
@@ -56,6 +64,7 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
     descriptors.current = new Map();
     setSummary(null);
     setFilter('all');
+    setCopied('');
   }, []);
 
   const refreshTab = useCallback(
@@ -215,10 +224,32 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
     if (used.length) await api.markMappingsUsed(origin, path, used).catch(() => undefined);
   }
 
+  /**
+   * For writing a site profile (like the TGNPDCL one): the page's labels, buttons,
+   * tabs, column headings and list items, to paste to the developer. Never the
+   * values typed into fields — but lists show what the page shows, so it is checked first.
+   */
+  const copyStructure = () => {
+    const t = tabRef.current;
+    if (!t) return;
+    run(async () => {
+      const outline = await bridge.describePage(t.tabId);
+      await navigator.clipboard.writeText(JSON.stringify(outline, null, 2));
+      setCopied('Page structure copied. Paste it to the developer. It has the labels, buttons and lists of this page, not what is typed in the fields. '
+        + 'Read it before sending: dropdowns and clickable lists are copied as the page shows them, so remove any patient names or numbers.');
+    });
+  };
+
   async function logout() {
     if (tabRef.current) await bridge.clear(tabRef.current.tabId);
     resetReview();
     await api.logout();
+    onLogout();
+  }
+
+  /** Another server was chosen in the settings; the sign-in went with the old one (api.useServer). */
+  async function serverChanged() {
+    if (tabRef.current) await bridge.clear(tabRef.current.tabId);
     onLogout();
   }
 
@@ -233,12 +264,20 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
           </div>
         </div>
         <div className="row-inline">
+          <button className="btn-icon" onClick={() => setGuide(true)} title="How FillPilot works" aria-label="How FillPilot works"><InfoIcon /></button>
+          <button className="btn-icon" onClick={() => setSettings((open) => !open)} title="Settings" aria-label="Settings" aria-expanded={settings}><SettingsIcon /></button>
           <button className="btn-icon" onClick={toggleTheme} title={theme === 'dark' ? 'Light theme' : 'Dark theme'} aria-label="Switch theme">
             {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
           </button>
           <button className="btn-icon" onClick={logout} title="Sign out" aria-label="Sign out"><LogOutIcon /></button>
         </div>
       </header>
+
+      {settings && (
+        <div className="section">
+          <Settings onClose={() => setSettings(false)} onServerChange={serverChanged} signedIn />
+        </div>
+      )}
 
       {error && (
         <div className="section">
@@ -285,6 +324,8 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
 
       {siteState === 'ready' && tab && isTgnpdclBillPage(tab.url) ? (
         <TgnpdclView tab={tab} onError={setError} />
+      ) : siteState === 'ready' && tab && isPmjayPage(tab.url) && api.mode !== 'reader' ? (
+        <PmjayView tab={tab} onError={setError} />
       ) : api.mode === 'reader' ? (
         <section className="section">
           <div className="card card-pad">
@@ -331,6 +372,12 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
             }}
           />
         </div>
+        {siteState === 'ready' && (
+          <div className="mt-sm center-text">
+            <button className="btn btn-text btn-sm" onClick={copyStructure}>Copy page structure</button>
+            {copied && <div className="msg msg-success mt-sm">{copied}</div>}
+          </div>
+        )}
       </section>
 
       {match && (
@@ -439,6 +486,8 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
       )}
       </>
       )}
+
+      {guide && <GuideOverlay onClose={closeGuide} />}
     </div>
   );
 }

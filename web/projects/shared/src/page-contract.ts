@@ -49,7 +49,9 @@ export type PageAction =
   | { type: 'setField'; field: string; value: string; label: string; /** The control's id on the site, tried before the label. */ id?: string }
   | { type: 'ensureRows'; headers: string[]; count: number; addButton?: string; label: string }
   | { type: 'setCell'; headers: string[]; row: number; column: string; value: string; optionMatch?: string; label: string }
-  | { type: 'addTariffItem'; code: string; tariff: string | null; /** Pattern for the site's tariff-type option; null = not known, never guessed. */ tariffOption?: string | null; qty: number; amountClaimed: number; label: string };
+  | { type: 'addTariffItem'; code: string; tariff: string | null; /** Pattern for the site's tariff-type option; null = not known, never guessed. */ tariffOption?: string | null; qty: number; amountClaimed: number; label: string }
+  /** PM-JAY Treatment Plan: pick the procedure listed as "Name(code-…)", set Days/Units, press "+". */
+  | { type: 'addProcedure'; code: string; units: number; label: string };
 
 export interface ActionResult {
   index: number;
@@ -58,6 +60,8 @@ export interface ActionResult {
   message: string;
   /** Done, but the message says something the person should check. */
   warn?: boolean;
+  /** Nothing was added: the row looked to be on the page already (the message says which). */
+  skipped?: boolean;
 }
 
 /** Identity of the record open on the page, read from its text (any tab). */

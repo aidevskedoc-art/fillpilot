@@ -8,14 +8,16 @@
 //           (local-account.ts), the approved sites (config.json) and the
 //           activity log (activity-log.ts) live in the extension itself.
 import type {
-  AllowedSite, DocumentDto, FormatResponse, LoginResponse, MatchResponse, TgnpdclClaim, UploadResponse, User,
+  AllowedSite, DocumentDto, FormatResponse, LoginResponse, MatchResponse, PmjayClaim, TgnpdclClaim, UploadResponse, User,
 } from '../../../web/projects/shared/src/api-types';
 import type { FieldDescriptor, PageInfo } from '../../../web/projects/shared/src/page-contract';
 import { activityLog } from './activity-log';
-import { billSession } from './bill-session';
+import { billSession, pmjayAdded, pmjaySession } from './bill-session';
 import { FirstLogin, localAccount } from './local-account';
 
 const SESSION_KEY = 'pfa.session';
+/** chrome.storage.local: the server chosen in the settings, when it is not the one this copy was built with. */
+const SERVER_KEY = 'fillpilot.server';
 
 interface Session {
   token: string;
@@ -35,8 +37,25 @@ export class ApiError extends Error {
   }
 }
 
+/** "192.168.1.20:4100" or a full URL → "http://192.168.1.20:4100". Throws when it is not a web address. */
+export function serverOrigin(input: string): string {
+  const text = input.trim();
+  let url: URL | null = null;
+  try {
+    url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `http://${text}`);
+  } catch {
+    /* reported below */
+  }
+  if (!text || !url || !/^https?:$/.test(url.protocol) || !url.hostname) {
+    throw new ApiError('That is not a server address. Write it like http://192.168.1.20:4100', 0);
+  }
+  return url.origin;
+}
+
 class PanelApi {
   base = 'http://localhost:4100';
+  /** The address this copy was built with (config.json). `base` differs once another one is chosen in the settings. */
+  builtBase = this.base;
   mode: 'server' | 'reader' = 'server';
   private sites: AllowedSite[] = [];
   private firstLogin: FirstLogin | null = null;
@@ -50,7 +69,7 @@ class PanelApi {
       const res = await fetch('./config.json', { cache: 'no-store' });
       if (res.ok) {
         const config = (await res.json()) as PanelConfig;
-        this.base = config.apiBase;
+        this.base = this.builtBase = config.apiBase;
         this.mode = config.mode === 'reader' ? 'reader' : 'server';
         this.sites = (config.sites ?? []).map((s, i) => ({ id: i + 1, origin: s.origin, displayName: s.displayName, isActive: true, createdAt: '' }));
         this.firstLogin = config.defaultLogin ?? null;
@@ -58,10 +77,44 @@ class PanelApi {
     } catch {
       /* no config.json — keep the defaults */
     }
+    if (this.mode === 'server') {
+      const chosen = (await chrome.storage.local.get(SERVER_KEY))[SERVER_KEY];
+      if (typeof chosen === 'string' && chosen) this.base = chosen;
+    }
     const stored = await chrome.storage.session.get(SESSION_KEY);
     const session = stored[SESSION_KEY] as Session | undefined;
     this.token = session?.token || null;
     return session?.user ?? null;
+  }
+
+  /** Does a FillPilot server answer at `base` right now? Needs no sign-in — for the settings card. */
+  async ping(): Promise<{ ok: boolean; ms: number }> {
+    const started = performance.now();
+    let ok = false;
+    try {
+      const res = await fetch(`${this.base}/api/health`, { cache: 'no-store', signal: AbortSignal.timeout(6000) });
+      ok = res.ok && ((await res.json()) as { status?: string }).status === 'ok';
+    } catch {
+      /* not reachable, no answer in time, or something else answers there */
+    }
+    return { ok, ms: Math.round(performance.now() - started) };
+  }
+
+  /**
+   * Points this installation at another server; null goes back to the one it
+   * was built with. The choice stays in this browser (chrome.storage.local).
+   * A sign-in belongs to the server that gave it, so it ends here, and the
+   * bill held for the session goes with it. The new server must list this
+   * extension in its CORS_ORIGIN, as every FillPilot server does.
+   */
+  async useServer(address: string | null): Promise<void> {
+    if (this.mode === 'reader') throw new ApiError('This installation runs on this PC — its address cannot be changed.', 0);
+    const next = address === null ? this.builtBase : serverOrigin(address);
+    if (next === this.base) return;
+    if (next === this.builtBase) await chrome.storage.local.remove(SERVER_KEY);
+    else await chrome.storage.local.set({ [SERVER_KEY]: next });
+    this.base = next;
+    await this.clearSession();
   }
 
   /** The full backend's features (stored documents, any-PDF matching) are not part of a reader installation. */
@@ -138,6 +191,8 @@ class PanelApi {
     this.token = null;
     await chrome.storage.session.remove(SESSION_KEY);
     await billSession.clear();
+    await pmjaySession.clear();
+    await pmjayAdded.clear();
   }
 
   completedDocuments = async () =>
@@ -182,6 +237,13 @@ class PanelApi {
     const form = new FormData();
     files.forEach((f) => form.append('files', f, f.name));
     return this.call<TgnpdclClaim>('POST', '/api/claims/tgnpdcl', form);
+  }
+
+  /** The same bills, read for the PM-JAY Treatment Plan: one row per package code. Nothing is kept on the server. */
+  readPmjayBills(files: File[]): Promise<PmjayClaim> {
+    const form = new FormData();
+    files.forEach((f) => form.append('files', f, f.name));
+    return this.call<PmjayClaim>('POST', '/api/claims/pmjay', form);
   }
 }
 

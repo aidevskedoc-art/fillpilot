@@ -7,6 +7,7 @@ const express = require('express');
 const multer = require('multer');
 const { extractDocument, ExtractionError, PdfReadError } = require('../extraction/extract');
 const { buildTgnpdclClaim } = require('../claims/tgnpdcl');
+const { buildPmjayClaim } = require('../claims/pmjay');
 
 const router = express.Router();
 
@@ -30,10 +31,16 @@ function inTurn(task) {
   return run;
 }
 
-// POST /api/claims/tgnpdcl — multipart "files": the Yashoda final bill and (optionally) the summary bill.
-router.post('/tgnpdcl', upload.array('files', MAX_FILES), route(async (req, res) => {
+/**
+ * The uploaded PDFs → { documents, final, summary, read }, or null after
+ * answering with what is wrong. `fills` names what the final bill is needed for.
+ */
+async function readBills(req, res, fills) {
   const files = req.files || [];
-  if (!files.length) return res.status(400).json({ error: 'Choose the final bill PDF (and the summary bill PDF)' });
+  if (!files.length) {
+    res.status(400).json({ error: 'Choose the final bill PDF (and the summary bill PDF)' });
+    return null;
+  }
 
   const read = await inTurn(async () => {
     const out = [];
@@ -65,28 +72,48 @@ router.post('/tgnpdcl', upload.array('files', MAX_FILES), route(async (req, res)
   const summaries = read.filter((r) => r.docType === 'yashoda-summary-bill');
   if (!finals.length) {
     const unread = read.filter((r) => r.error).map((r) => `${r.fileName}: ${r.error}`).join('; ');
-    return res.status(422).json({
-      error: unread || 'None of these PDFs is a Yashoda final bill (the itemised bill with "Charged Amount") — the tabs are filled from it.',
+    res.status(422).json({
+      error: unread || `None of these PDFs is a Yashoda final bill (the itemised bill with "Charged Amount") — ${fills} filled from it.`,
       documents,
     });
+    return null;
   }
   if (finals.length > 1 || summaries.length > 1) {
-    return res.status(422).json({ error: 'These PDFs hold more than one final or summary bill — choose one patient\'s bills at a time.', documents });
+    res.status(422).json({ error: 'These PDFs hold more than one final or summary bill — choose one patient\'s bills at a time.', documents });
+    return null;
   }
+  return { documents, read, final: finals[0].structured, summary: summaries[0]?.structured };
+}
 
-  const claim = buildTgnpdclClaim({ final: finals[0].structured, summary: summaries[0]?.structured });
-  // The log records that bills were read — not whose, and not their file names.
+/** The log records that bills were read — not whose, and not their file names. */
+async function logRead(req, read, site) {
   // (The reading service on its own has no accounts and no log: reader-server.js.)
-  if (req.user) {
-    await require('../audit-log').logAction({
-      actorUserId: req.user.sub,
-      entityType: 'claim',
-      action: 'BILLS_READ',
-      details: { files: read.length, pages: read.reduce((n, r) => n + (r.pageCount || 0), 0) },
-      req,
-    });
-  }
-  res.json({ documents, ...claim });
+  if (!req.user) return;
+  await require('../audit-log').logAction({
+    actorUserId: req.user.sub,
+    entityType: 'claim',
+    action: 'BILLS_READ',
+    details: { site, files: read.length, pages: read.reduce((n, r) => n + (r.pageCount || 0), 0) },
+    req,
+  });
+}
+
+// POST /api/claims/tgnpdcl — multipart "files": the Yashoda final bill and (optionally) the summary bill.
+router.post('/tgnpdcl', upload.array('files', MAX_FILES), route(async (req, res) => {
+  const bills = await readBills(req, res, 'the tabs are');
+  if (!bills) return;
+  const claim = buildTgnpdclClaim({ final: bills.final, summary: bills.summary });
+  await logRead(req, bills.read, 'tgnpdcl');
+  res.json({ documents: bills.documents, ...claim });
+}));
+
+// POST /api/claims/pmjay — the same bills → the PM-JAY Treatment Plan rows (one per package code).
+router.post('/pmjay', upload.array('files', MAX_FILES), route(async (req, res) => {
+  const bills = await readBills(req, res, 'the Treatment Plan is');
+  if (!bills) return;
+  const claim = buildPmjayClaim({ final: bills.final, summary: bills.summary });
+  await logRead(req, bills.read, 'pmjay');
+  res.json({ documents: bills.documents, ...claim });
 }));
 
 module.exports = router;

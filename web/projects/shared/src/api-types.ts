@@ -73,6 +73,23 @@ export interface TgnpdclClaim {
   checks: ClaimCheck[];
 }
 
+/**
+ * POST /api/claims/pmjay (the bill PDFs, multipart) — the PM-JAY Treatment Plan
+ * rows (backend/src/claims/pmjay.js): one per package code; the site prices them.
+ * Kept by neither the server nor the panel beyond the browser session.
+ */
+export interface PmjayClaim {
+  documents: { fileName: string; docType: string | null; pageCount: number | null; error?: string }[];
+  patient: { name?: string; ipNo?: string; consultant?: string };
+  hospitalBillNumber: string | null;
+  /** units = how many times the bill charges the code; amountOnBill is for reference — the site uses its own rate. */
+  procedures: { code: string; units: number; lines: number; amountOnBill: number; description: string; section: string; notes: string[] }[];
+  /** Bill lines that cannot be picked by code (no code, or a combined one) — for the person. */
+  manual: { section: string; description: string; count: number; amount: number; reason: string }[];
+  totals: { billTotal: number; coded: number; notCoded: number };
+  checks: ClaimCheck[];
+}
+
 export interface UploadResponse {
   documents: DocumentDto[];
   rejected: { fileName: string; error: string }[];

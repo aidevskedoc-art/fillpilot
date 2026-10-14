@@ -4,8 +4,9 @@
 const fs = require('fs');
 const path = require('path');
 const { extractDocument } = require('../src/extraction/extract');
-const { normalizeCode, parseAmount, parseQuantity } = require('../src/extraction/formats/yashoda');
+const { normalizeCode, parseAmount, parseQuantity, parseFinalBill } = require('../src/extraction/formats/yashoda');
 const { buildTgnpdclClaim } = require('../src/claims/tgnpdcl');
+const { buildPmjayClaim } = require('../src/claims/pmjay');
 const { buildAliasIndex, seedAliases } = require('../src/alias-index');
 const { ocrAvailable } = require('../src/ocr');
 const { check, checkTrue, done } = require('./lib/check');
@@ -18,10 +19,70 @@ check('code 75 IA → 751A', normalizeCode('75 IA/NIMS').code, '751A');
 check('code NIMS/IIE → 11E', normalizeCode('NIMS/IIE').code, '11E');
 check('COMM misreads', ['2121/COPN.', '586/corm.', '303/cou.', '586/conun.'].map((c) => normalizeCode(c).tariff), ['COMM', 'COMM', 'COMM', 'COMM']);
 check('surgery code kept', normalizeCode('S5.1.17').code, 'S5.1.17');
+check('PM-JAY codes: O/0 and I/1 repaired', ['CIOII', 'RIOOI', 'LBIOO', 'NIOOI', 'C1001', 'R1034'].map((c) => normalizeCode(c).code), ['CI011', 'RI001', 'LB100', 'NI001', 'CI001', 'RI034']);
+check('PM-JAY codes read right are kept', ['LB025', 'CC003', 'NU116', 'EP092', 'GP009', 'PT004'].map((c) => normalizeCode(c).code), ['LB025', 'CC003', 'NU116', 'EP092', 'GP009', 'PT004']);
+check('marked code keeps the NIMS repair only', [normalizeCode('N1003/NIMS').code, normalizeCode('HA006/NIMS').code], ['N1003', 'HA006']);
 check('amount Indian grouping', parseAmount('2,01,742.72'), 201742.72);
 check('amount OCR i → 1', parseAmount('i, 575.00'), 1575);
 check('amount unreadable', parseAmount('1,5?5.0'), null);
 check('quantity', parseQuantity('15 Time(s) x 45.00'), { qty: 15, unit: 'Time', rate: 45 });
+check('quantity OCR-spoilt is not parsed (the bill reader then uses amount ÷ rate)', parseQuantity('2O Time(s) X 40.00').qty ?? null, null);
+{
+  // A final-bill page built by hand: the count "20" read as "2O" — the units must not quietly become 1.
+  const L = (y, ...segs) => ({ y, h: 8, text: segs.map((s) => s[1]).join(' | '), segments: segs.map(([x0, text]) => ({ x0, x1: x0 + 50, text })) });
+  const page = (valueText) => [{ page: 1, width: 600, lines: [
+    L(800, [10, 'Name : MR. TEST'], [480, 'IP No: 1']),
+    L(760, [10, '1. RBS WITH GLUCOMETER']),
+    L(740, [50, 'RBS WITH GLUCOMETER'], [300, valueText], [420, 'LB055'], [510, '800.00']),
+    L(720, [370, 'Sub Total...'], [510, '800.00']),
+    L(700, [370, 'Grand Total...'], [510, '800.00']),
+  ] }];
+  const spoilt = parseFinalBill(page('2O Time(s) X 40.00')).sections[0].groups[0].items[0];
+  check('quantity OCR-spoilt: count = amount ÷ rate, flagged', [spoilt.qty, spoilt.issues.some((m) => /amount ÷ rate = 20/.test(m))], [20, true]);
+  const unreadable = parseFinalBill(page('2O Time(s) X 4?.00')).sections[0].groups[0].items[0];
+  check('quantity unreadable, no rate: 1 assumed, flagged', [unreadable.qty, unreadable.issues.some((m) => /1 assumed/.test(m))], [1, true]);
+}
+
+// Claim rules on hand-made bills (pure — no PDFs, no OCR, no patient data)
+const item = (description, qty, rate, amount) => ({ description, qty, unit: null, rate, code: null, tariff: null, codeRaw: null, amount, page: 1, issues: [] });
+const section = (name, groups) => ({ no: null, name, groups: groups.map(([g, items, subTotal]) => ({ name: g, items, subTotal })) });
+const finalBill = (sections, grandTotal) => ({ patient: { ipNo: '1' }, sections, doctors: [], totals: { grandTotal, netAmount: null }, issues: [] });
+const summaryBill = (categories, gross) => ({ invoiceNo: 'T1', patient: { ipNo: '1' }, categories, totals: { gross, paid: 0 }, issues: [] });
+const errorsOf = (claim) => claim.checks.filter((c) => c.level === 'error').map((c) => c.message);
+
+const consult = buildTgnpdclClaim({ final: finalBill([
+  section('DOCTOR VISIT CHARGES', [['DOCTOR VISIT CHARGES', [item('DR. A KUMAR', 2, 500, 1000)], 1000]]),
+  section('CROSS CONSULTATION CHARGES', [['CROSS CONSULTATION CHARGES', [item('DR. B RAO', 1, 800, 800)], 800]]),
+], 1800) });
+check('claim: doctors from every doctor/consultation section', consult.tabs.room.doctors.map((d) => [d.name, d.days]), [['A KUMAR', 2], ['B RAO', 1]]);
+check('claim: consultation rows not lost to investigations', consult.tabs.investigations.items.length, 0);
+
+const ward = buildTgnpdclClaim({ final: finalBill([section('ROOM RENT', [['ROOM RENT', [item('GENERAL WARD', 3, null, 6000)], 6000]])], 6000) });
+check('claim: ward rate = amount ÷ days when no rate is read', ward.tabs.room.wards.map((w) => [w.ratePerDay, w.days]), [[2000, 3]]);
+checkTrue('claim: derived ward rate flagged', ward.checks.some((c) => /rate per day not readable/.test(c.message)));
+
+const split = buildTgnpdclClaim({
+  final: finalBill([
+    section('PHARMACY', [['PHARMACY', [item('ISSUES 1', 1, null, 100)], 100], [null, [item('ISSUES 2', 1, null, 50)], 50]]),
+    section('INVESTIGATIONS', [['HAEMATOLOGY', [item('CBP', 1, null, 100)], 100], ['BIOCHEMISTRY', [item('LFT', 1, null, 200)], 200]]),
+  ], 450),
+  summary: summaryBill([{ name: 'PHARMACY', amount: 150 }, { name: 'INVESTIGATIONS', amount: 300 }], 450),
+});
+check('claim: summary line vs all groups of that name / section', errorsOf(split), []);
+checkTrue('claim: section-level summary line found', !split.checks.some((c) => /INVESTIGATIONS.*not found/.test(c.message)));
+
+// PM-JAY Treatment Plan: one row per code, units = times charged; the rest is manual.
+const coded = (description, code, qty, amount) => ({ ...item(description, qty, null, amount), code });
+const pmjay = buildPmjayClaim({ final: finalBill([
+  section('LABORATORY', [['HAEMATOLOGY', [coded('HAEMOGRAM', 'LB012', 1, 300), coded('HAEMOGRAM', 'LB012', 1, 300), coded('COMPLETE HAEMOGRAM', 'LB012', 1, 300)], 900]]),
+  section('RBS WITH GLUCOMETER', [['RBS WITH GLUCOMETER', [coded('RBS WITH GLUCOMETER', 'LB055', 20, 800), coded('RBS WITH GLUCOMETER', 'LB055', 5, 200)], 1000]]),
+  section('DOCTOR FEES', [['DOCTOR FEES', [item('A KUMAR', 1, 350, 350), item('A KUMAR', 1, 350, 350)], 700]]),
+  section('RADIOLOGY', [['RADIOGRAPH', [coded('RADIOGRAPH RT HIP', 'R171+171', 1, 450)], 450]]),
+], 3050) });
+check('pmjay: one row per code, units = times charged', pmjay.procedures.map((p) => [p.code, p.units, p.lines]), [['LB012', 3, 3], ['LB055', 25, 2]]);
+check('pmjay: same code, other wording noted', pmjay.procedures[0].notes, ['Same code on the bill for: HAEMOGRAM; COMPLETE HAEMOGRAM']);
+check('pmjay: uncoded and combined lines left for the person', pmjay.manual.map((m) => [m.description, m.count, m.amount, m.reason]),
+  [['A KUMAR', 2, 700, 'No code on the bill'], ['RADIOGRAPH RT HIP', 1, 450, 'Combined code R171+171']]);
 
 const FIXTURES = path.join(__dirname, '..', 'test-fixtures');
 const finalPdf = path.join(FIXTURES, 'yashoda-final-bill.pdf');
@@ -109,6 +170,22 @@ const summaryPdf = path.join(FIXTURES, 'yashoda-summary-bill.pdf');
     check('bill 2: stay = room + ICU (no warning)', c2.checks.some((x) => /stay was/.test(x.message)), false);
   } else {
     console.log('SKIP  bill 2 checks (test-fixtures/yashoda-*-bill-2.pdf missing)');
+  }
+
+  // Bill 3: a PM-JAY patient — unmarked package codes (CI011, RI034), header read as "Name ." by OCR.
+  const final3 = path.join(FIXTURES, 'bills', 'case-03-pmjay', 'final-bill.pdf');
+  if (fs.existsSync(final3)) {
+    const f3 = (await extractDocument(fs.readFileSync(final3), aliasIndex)).structured;
+    const items3 = f3.sections.flatMap((x) => x.groups.flatMap((g) => g.items));
+    const p3 = buildPmjayClaim({ final: f3 });
+    const units = (code) => p3.procedures.find((p) => p.code === code)?.units;
+    check('bill 3: IP from an OCR\'d "Name ." header', f3.patient.ipNo, '119719');
+    check('bill 3: header kept out of descriptions', items3.filter((i) => /\bName\s*[:.;]/i.test(i.description)).length, 0);
+    check('bill 3: 55 procedure rows', p3.procedures.length, 55);
+    check('bill 3: codes repaired', ['CI011', 'RI001', 'CI001', 'LB100', 'LB001', 'NI001', 'RI034'].every((c) => units(c) != null), true);
+    check('bill 3: units', ['LB012', 'LB120', 'LB055', 'CC003', 'RI034', 'CI011'].map(units), [16, 26, 204, 15, 20, 2]);
+  } else {
+    console.log('SKIP  bill 3 checks (test-fixtures/bills/case-03-pmjay/final-bill.pdf missing)');
   }
   done('yashoda');
 })().catch((err) => {

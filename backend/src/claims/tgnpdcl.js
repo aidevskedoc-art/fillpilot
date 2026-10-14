@@ -43,11 +43,21 @@ function buildTgnpdclClaim({ final, summary }) {
   // Every group total is printed on both bills — two independent OCR reads of the same number.
   const groups = final.sections.flatMap((s) => s.groups.map((g) => ({ ...g, section: s.name })));
   if (summary) {
-    const byName = new Map(groups.map((g) => [normLabel(g.name || g.section), g]));
+    // One name can head several groups (a section's unnamed groups after a
+    // "Sub Total"), so the summary's line is compared with all of them together;
+    // a summary line named after a whole section is compared with that section.
+    const byName = new Map();
+    const bySection = new Map();
+    const addTo = (map, key, amount) => map.set(key, round2((map.get(key) || 0) + (amount || 0)));
+    for (const g of groups) {
+      addTo(byName, normLabel(g.name || g.section), g.subTotal);
+      addTo(bySection, normLabel(g.section), g.subTotal);
+    }
     for (const c of summary.categories) {
-      const g = byName.get(normLabel(c.name));
-      if (!g) add('warning', `"${c.name}" (${c.amount}) is on the summary bill but not found on the final bill`);
-      else if (!same(g.subTotal, c.amount)) add('error', `${c.name}: final bill ${g.subTotal} vs summary bill ${c.amount} — check this amount`);
+      const key = normLabel(c.name);
+      const amount = byName.has(key) ? byName.get(key) : bySection.get(key);
+      if (amount === undefined) add('warning', `"${c.name}" (${c.amount}) is on the summary bill but not found on the final bill`);
+      else if (!same(amount, c.amount)) add('error', `${c.name}: final bill ${amount} vs summary bill ${c.amount} — check this amount`);
     }
     if (!same(final.totals.grandTotal, summary.totals.gross)) {
       add('error', `Grand total differs: final bill ${final.totals.grandTotal} vs summary bill ${summary.totals.gross}`);
@@ -60,19 +70,35 @@ function buildTgnpdclClaim({ final, summary }) {
   const room = { roomDays: 0, icuDays: 0, wards: [], doctors: [], numberOfDoctors: 0 };
   const investigations = { items: [], implants: null };
   const pharmacy = { total: null, rows: [], note: null };
+  // Every section DOCTOR matches — the same test that keeps them out of
+  // Investigations, so a "CONSULTATION CHARGES" section can't fall between the two.
+  const doctorItems = [];
 
   for (const section of final.sections) {
     for (const g of section.groups) {
       const label = `${section.name} ${g.name || ''}`;
       for (const item of g.items) {
         const source = { section: section.name, group: g.name, description: item.description, page: item.page };
-        if (DOCTOR.test(section.name)) continue; // handled from final.doctors below
+        if (DOCTOR.test(section.name)) {
+          doctorItems.push(item);
+          continue;
+        }
         if (ICU.test(label)) {
           room.icuDays += item.qty || 0;
           continue;
         }
         if (ROOM.test(label) && !/ALPHA/i.test(label)) {
-          room.wards.push({ ratePerDay: item.rate ?? item.amount, days: item.qty || 1, amount: item.amount, source });
+          const days = item.qty || 1;
+          if (item.rate == null && item.amount == null) {
+            add('warning', `Room rent "${item.description}": neither the rate nor the amount could be read — enter this ward row yourself`);
+            continue;
+          }
+          // No rate printed (or unreadable): the amount covers all the days, so the rate is amount ÷ days.
+          const ratePerDay = item.rate ?? round2(item.amount / days);
+          if (item.rate == null && days > 1) {
+            add('warning', `Room rent "${item.description}": rate per day not readable — worked out as ${item.amount} ÷ ${days} day(s) = ${ratePerDay}; check it`);
+          }
+          room.wards.push({ ratePerDay, days, amount: item.amount, source });
           continue;
         }
         if (PHARMACY.test(label)) {
@@ -114,15 +140,20 @@ function buildTgnpdclClaim({ final, summary }) {
   }
   investigations.items = mergeByCode(investigations.items);
 
-  room.doctors = (final.doctors || []).map((d) => {
-    const name = d.name.replace(/^DR\.?\s*/i, '').trim();
+  const doctorCount = new Map();
+  for (const item of doctorItems) doctorCount.set(nameKey(item.description), (doctorCount.get(nameKey(item.description)) || 0) + 1);
+  room.doctors = doctorItems.map((item) => {
+    const name = item.description.replace(/^DR\.?\s*/i, '').trim();
     const isConsultant = consultant && nameKey(name) === nameKey(consultant);
+    const notes = isConsultant ? [] : ['Specialization not on the bill — add it if the site needs it'];
+    const repeated = doctorCount.get(nameKey(item.description)) > 1;
+    if (repeated) notes.push('This doctor is on the bill more than once — check whether the site wants one row with the days added up');
     return {
       name: isConsultant && speciality ? `${name} (${speciality})` : name,
-      days: d.visits,
-      amount: d.amount,
-      review: !isConsultant,
-      notes: isConsultant ? [] : ['Specialization not on the bill — add it if the site needs it'],
+      days: item.qty,
+      amount: item.amount,
+      review: !isConsultant || repeated,
+      notes,
     };
   });
   room.numberOfDoctors = room.doctors.length;

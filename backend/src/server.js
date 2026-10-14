@@ -1,5 +1,7 @@
 require('dotenv').config();
 
+const http = require('http');
+const os = require('os');
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
@@ -96,9 +98,44 @@ async function start() {
   if (requeued) console.log(`Re-queued ${requeued} unfinished document(s).`);
   armRetention();
 
-  app.listen(PORT, HOST, () => {
+  const server = app.listen(PORT, HOST, () => {
     console.log(`FillPilot backend listening on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
+    // The address the other PCs' extension is built with (API_BASE, see extension/build.mjs).
+    if (HOST === '0.0.0.0') for (const address of networkAddresses()) console.log(`  from other PCs: http://${address}:${PORT}`);
   });
+  server.on('error', async (err) => {
+    if (err.code === 'EADDRINUSE' && (await alreadyRunning())) {
+      console.log(`The FillPilot server is already running on this PC (port ${PORT}) — nothing more to start.`);
+    } else {
+      console.error(err.code === 'EADDRINUSE'
+        ? `Port ${PORT} is in use by another program — the FillPilot server cannot start.`
+        : `Failed to start server: ${err.message}`);
+    }
+    process.exit(1);
+  });
+}
+
+/**
+ * Is the program that holds the port a FillPilot server?
+ * (http.get, not fetch: on Windows, process.exit() straight after a fetch trips a Node assertion.)
+ */
+function alreadyRunning() {
+  return new Promise((resolve) => {
+    const req = http.get({ host: HOST === '0.0.0.0' ? '127.0.0.1' : HOST, port: PORT, path: '/api/health', timeout: 3000 }, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve(res.statusCode === 200 && /"status"\s*:\s*"ok"/.test(body)));
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(false));
+  });
+}
+
+function networkAddresses() {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .filter((a) => a.family === 'IPv4' && !a.internal)
+    .map((a) => a.address);
 }
 
 if (require.main === module) {

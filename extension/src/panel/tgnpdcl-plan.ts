@@ -45,11 +45,14 @@ const NEXT = '^\\s*Next(\\s*(step|tab))?\\s*[»›→>▸]*\\s*$';
 /**
  * The bill's tariff mark → the site's "Select Tariff Type" option. The site
  * (2026-10) offers EHS Ax-I…VI, NIMS(2015), NIMS2022, CGHS 21 and three
- * CGHS(2025) tiers; the bills mark codes NIMS or COMM. A mark that is not
- * listed here is never guessed — its codes are left for the person.
+ * CGHS(2025) tiers; the bills mark codes NIMS or COMM ("COMM." too). Yashoda's
+ * NIMS rates are the site's EHS Ax-V list (82A CRP ₹750 on both; NIMS(2015)
+ * has ₹500) and COMM is EHS Ax-VI — confirmed with the hospital, 2026-10-13.
+ * A mark that is not listed here is never guessed — its codes are left for the person.
  */
 const TARIFF_OPTION: Record<string, string> = {
-  NIMS: '^NIMS\\s*\\(\\s*2015',
+  NIMS: '^EHS\\s*Ax\\s*-?\\s*V\\s*$',
+  COMM: '^EHS\\s*Ax\\s*-?\\s*VI\\s*$',
 };
 
 /** Captions this profile relies on — located in the page outline saved when a step fails. */

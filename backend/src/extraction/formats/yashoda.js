@@ -45,9 +45,12 @@ function normalizeCode(raw) {
     if (/^N[I1L!|]M[S5]\.?$/.test(part)) tariff = 'NIMS';
     // "COMM." after the slash, as OCR mangles it: COPN. CORM. COU. CONUN. C02Q.F CO»N.F
     else if (i > 0 && /^C[O0][^/]{0,5}$/.test(part) && !/^C[O0]\d+$/.test(part)) tariff = 'COMM';
-    else codeParts.push(fixCodePart(part));
+    else codeParts.push(part);
   });
-  const code = codeParts.join('/');
+  // A NIMS / COMM code has its 1s read as I or L ("RI 71/NIMS" → R171). An
+  // unmarked code is a PM-JAY package code (two letters, three digits), where
+  // OCR swaps both ways ("CIOII" → CI011, "R1034" → RI034).
+  const code = codeParts.map((p) => (tariff ? fixCodePart(p) : fixPackageCode(p))).join('/');
   const single = '[A-Z]{0,3}\\d+[A-Z]?';
   const valid = new RegExp(`^${single}(\\+${single})*$`).test(code) || /^[A-Z]\d+(\.\d+)+$/.test(code);
   return { code, tariff, raw: raw.trim(), valid: Boolean(code) && valid };
@@ -60,6 +63,17 @@ function fixCodePart(part) {
     if (!/\d/.test(digits) && digits.length < 2) return m;
     return prefix + digits.replace(/[IL]/g, '1') + suffix + plus;
   });
+}
+
+/**
+ * A PM-JAY package code as OCR reads it → two letters + three digits:
+ * "CIOII" → "CI011", "LBIOO" → "LB100", "C1001" → "CI001". Anything that does
+ * not become that shape is left as read (and flagged if it is not a code).
+ */
+function fixPackageCode(part) {
+  if (part.length !== 5) return part;
+  const fixed = part.slice(0, 2).replace(/1/g, 'I').replace(/0/g, 'O') + part.slice(2).replace(/O/g, '0').replace(/[IL]/g, '1');
+  return /^[A-Z]{2}\d{3}$/.test(fixed) ? fixed : part;
 }
 
 /** "2 Visit(s) x 350.00", "1 Time ( s ) x 75.00", "2 X 450.00" → { qty, unit, rate } */
@@ -119,8 +133,11 @@ function columns(line, width) {
   };
 }
 
+/** OCR reads the header's "Name :" as "Name ." or "Name ;" too. */
+const NAME_LABEL = 'Name\\s*[:.;]';
+
 function isHeaderLine(text) {
-  return /YASHODA\s+HEALTHCARE/i.test(text) || /^Name\s*:/i.test(text) || (/^Description\b/i.test(text) && /Charged/i.test(text)) || /^Page\s+\d+\s+of\s+\d+$/i.test(text);
+  return /YASHODA\s+HEALTHCARE/i.test(text) || new RegExp(`^${NAME_LABEL}`, 'i').test(text) || (/^Description\b/i.test(text) && /Charged/i.test(text)) || /^Page\s+\d+\s+of\s+\d+$/i.test(text);
 }
 
 /** Median x of item descriptions on a page (lines that carry an amount). */
@@ -160,7 +177,7 @@ function parseFinalBill(pages) {
     itemIndent = itemIndentOf(lines, width) ?? itemIndent;
     for (const line of lines) {
       const text = line.text.replace(/\s*\|\s*/g, ' ').trim();
-      const nameMatch = /^Name\s*:\s*(.+?)\s+IP\s*No\s*[:.]?\s*(\d+)/i.exec(text);
+      const nameMatch = new RegExp(`^${NAME_LABEL}\\s*(.+?)\\s+IP\\s*No\\s*[:.;]?\\s*(\\d+)`, 'i').exec(text);
       if (nameMatch) {
         patient.name ||= nameMatch[1].trim();
         patient.ipNo ||= nameMatch[2];
@@ -229,7 +246,21 @@ function parseFinalBill(pages) {
         nearest.parts.push({ pos: t.pos, text: t.desc });
       }
       g.items = anchors.map((a) => {
-        const q = parseQuantity(a.value);
+        let q = parseQuantity(a.value);
+        // "2O Time(s) X 40.00": OCR spoilt the count, which would quietly become 1.
+        // Count × rate is the amount, so the count is amount ÷ rate when that is whole.
+        let qtyNote = null;
+        if (q.qty == null && a.value && /\d|\(\s*s\s*\)|[xX×]\s*[\dIlOo]/.test(a.value)) {
+          const rate = parseAmount(/[xX×]\s*([\dIlOo,.\s]+)$/.exec(a.value)?.[1]);
+          const charged = parseAmount(a.amount);
+          const count = rate && charged != null ? round2(charged / rate) : null;
+          if (count && Number.isInteger(count)) {
+            q = { qty: count, unit: null, rate };
+            qtyNote = `Quantity "${a.value}" unreadable — worked out as amount ÷ rate = ${count}`;
+          } else {
+            qtyNote = `Quantity "${a.value}" could not be read — 1 assumed`;
+          }
+        }
         const code = normalizeCode(a.code);
         const item = {
           description: a.parts.sort((x, y) => x.pos - y.pos).map((p) => p.text).join(' ').replace(/\s+/g, ' ').trim(),
@@ -244,6 +275,7 @@ function parseFinalBill(pages) {
           page: a.page,
           issues: [],
         };
+        if (qtyNote) item.issues.push(qtyNote);
         if (code && !code.valid) item.issues.push(`Code "${code.raw}" may be misread`);
         if (item.amount == null) item.issues.push(`Amount "${a.amount || ''}" could not be read`);
         if (item.amount != null && item.rate != null && q.qty && !sameAmount(round2(q.qty * item.rate), item.amount)) {
@@ -263,7 +295,10 @@ function parseFinalBill(pages) {
     issues.push({ level: 'info', message: `Grand total not readable — using the sum of the sections, ${computedTotal.toFixed(2)}` });
     grandTotal = computedTotal;
   } else if (!sameAmount(grandTotal, computedTotal)) {
-    issues.push({ level: 'error', message: `Sections add up to ${computedTotal.toFixed(2)} but the grand total reads ${grandTotal.toFixed(2)}` });
+    const gap = round2(grandTotal - computedTotal);
+    // 4,01,645.90 read as 645.90: OCR dropped the leading digits, so the gap is a round number.
+    const hint = gap > 0 && gap % 1000 === 0 ? ` — the difference ${gap.toFixed(2)} is a round number: a large amount probably lost its first digits in reading` : '';
+    issues.push({ level: 'error', message: `Sections add up to ${computedTotal.toFixed(2)} but the grand total reads ${grandTotal.toFixed(2)}${hint}` });
   }
   if (netAmount != null && Math.abs(Math.round(grandTotal) - netAmount) > 1) {
     issues.push({ level: 'error', message: `Net amount ${netAmount.toFixed(2)} does not match the grand total ${grandTotal.toFixed(2)}` });

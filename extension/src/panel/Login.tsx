@@ -1,8 +1,10 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useCallback, useState } from 'react';
 import type { User } from '../../../web/projects/shared/src/api-types';
 import { api, messageOf } from './api';
-import { ShieldIcon } from './Icons';
+import { GuideOverlay } from './Guide';
+import { InfoIcon, SettingsIcon, ShieldIcon } from './Icons';
 import { Logo } from './Logo';
+import { Settings } from './Settings';
 
 export function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [username, setUsername] = useState('');
@@ -13,6 +15,10 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [again, setAgain] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [settings, setSettings] = useState(false);
+  const [server, setServer] = useState(api.base);
+  const [guide, setGuide] = useState(false);
+  const closeGuide = useCallback(() => setGuide(false), []);
   const local = api.mode === 'reader';
 
   async function submit(e: FormEvent) {
@@ -37,7 +43,16 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
   }
 
   return (
+    <>
     <form className="hero" onSubmit={submit}>
+      <div className="hero-tools">
+        <button className="btn-icon" type="button" onClick={() => setGuide(true)} title="How FillPilot works" aria-label="How FillPilot works">
+          <InfoIcon />
+        </button>
+        <button className="btn-icon" type="button" onClick={() => setSettings((open) => !open)} title="Settings" aria-label="Settings" aria-expanded={settings}>
+          <SettingsIcon />
+        </button>
+      </div>
       <div className="hero-brand">
         <Logo size={54} />
         <div>
@@ -45,6 +60,7 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
           <div className="muted small">From PDF to web form — you review, you submit</div>
         </div>
       </div>
+      {settings && <Settings onClose={() => setSettings(false)} onServerChange={() => { setError(''); setServer(api.base); }} />}
       {error && <div className="msg msg-error">{error}</div>}
       <label className="field">
         <span>Username</span>
@@ -75,7 +91,9 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
         </button>
       )}
       <div className="safe"><ShieldIcon size={14} /> Never saves or submits a form for you</div>
-      <div className="muted small center-text">{local ? 'The sign-in is kept in this browser on this PC' : `Server: ${api.base}`}</div>
+      <div className="muted small center-text">{local ? 'The sign-in is kept in this browser on this PC' : `Server: ${server}`}</div>
     </form>
+    {guide && <GuideOverlay onClose={closeGuide} />}
+    </>
   );
 }

@@ -55,7 +55,9 @@ Then go to `chrome://extensions`, turn on **Developer mode**, click **Load
 unpacked**, and select `extension/dist`. The extension ID is fixed
 (`fjikihdjljokehgbcjdccbojpogdmadc`) by the `key` in `manifest.json`, so it
 matches `CORS_ORIGIN` in `backend/.env`. For another backend URL, build with
-`$env:API_BASE="https://…"; npm.cmd run build`.
+`$env:API_BASE="https://…"; npm.cmd run build` — or change it in the installed
+extension: the gear icon (top bar and sign-in screen) shows the server address
+and whether it answers, and **Change** points that browser at another server.
 
 ## Try it end to end
 
@@ -149,6 +151,22 @@ npm.cmd run profile-pdf -- path\to\file.pdf all   # see how a new PDF layout is 
 `backend/test-fixtures/` holds real sample PDFs (patient data). It is
 **gitignored**, so keep it that way. `expected.json` there lists values read by
 hand from each PDF.
+
+**Bill reading accuracy** (Yashoda bills → TGNPDCL claim), measured on real bills:
+
+1. Put each patient's final bill and summary bill PDFs in their own folder:
+   `backend\test-fixtures\bills\<case name>\` (any file names).
+2. `npm.cmd run bill-accuracy -- draft` writes `expected.draft.json` in every
+   folder that has no `expected.json` yet: what FillPilot read.
+3. Check every value in it against the paper bill. Fix the wrong ones, add the
+   rows it missed, delete rows that are not on the bill, then rename the file to
+   `expected.json`.
+4. `npm.cmd run bill-accuracy` reads every case again and reports how many
+   values came out right: per case (with each wrong, missing or extra value)
+   and overall (patient, totals, room, doctors, investigations).
+
+Run step 4 after every change to the reading code. A fix that helps one bill
+and breaks another shows up straight away.
 
 ## How it works
 

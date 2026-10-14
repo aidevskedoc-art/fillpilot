@@ -17,6 +17,14 @@ const CLICKABLE_SELECTOR = 'button, a, [role="tab"], [role="button"], input[type
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const norm = (s: string | null | undefined) => (s || '').replace(/\s+/g, ' ').trim();
+
+/**
+ * Pace of a fill, in ms: a pause after every step, and between the parts of
+ * one step (pick a search result, then quantity, then amount). Slower than the
+ * page needs, so the site's own scripts and server keep up as they do for a
+ * person — at full speed a site can drop a value or add a row half-done.
+ */
+const PACE = { step: 600, part: 200 };
 const rx = (source: string) => new RegExp(source, 'i');
 /** A caption pattern as words, for messages: "No\\.?\\s*of\\s*Days" → "No. of Days". */
 const readable = (source: string) =>
@@ -68,7 +76,8 @@ const isForbidden = (el: Element) => clickCaptions(el).some((c) => FORBIDDEN_CLI
 function safeClick(el: HTMLElement): void {
   const caption = clickCaptions(el).find((c) => FORBIDDEN_CLICK.test(c));
   if (caption) throw new Error(`Refused to click "${caption}" — the extension never saves, submits or removes.`);
-  el.scrollIntoView({ block: 'center' });
+  // Only as far as needed to bring it on screen — the page should not jump about while filling.
+  el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   el.click();
 }
 
@@ -329,6 +338,7 @@ async function ensureRows(headers: string[], count: number, addButton?: string):
     const grew = await waitFor(() => dataRows(findTable(headers) || t).length > rows, 3000);
     if (!grew) throw new Error(`Clicking "${textOf(button)}" did not add a row`);
     rows = dataRows(findTable(headers) || t).length;
+    await sleep(PACE.part);
   }
   return rows > count ? `${rows} rows present (${count} needed — extra rows left as they are)` : `${rows} row(s) ready`;
 }
@@ -355,10 +365,15 @@ interface BillRow {
 const SEARCH_BOX = 'Search.{0,24}(tariff|code|description|item|procedure|investigation)|(tariff|code).{0,16}search';
 const ADD_BUTTON = '^\\+?\\s*Add(\\s*(item|row|to\\s*bill|from\\s*tariff))?\\s*$';
 
-/** The code as a whole token: "586" is not found in "1,586.00" or "5860". */
+/**
+ * A search result naming `code`: its text starts with the code as a whole
+ * token, as the site prints it ("82A – C-Reactive Protein - CRP (₹750)").
+ * "586" is not found in "1,586.00" or "5860", and a short code such as "23"
+ * never matches another item's price "(₹23)" — that item would be added instead.
+ */
 function codeToken(code: string): RegExp {
   const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[^A-Za-z0-9.,])${escaped}($|[^A-Za-z0-9.])`, 'i');
+  return new RegExp(`^\\s*${escaped}($|[^A-Za-z0-9.])`, 'i');
 }
 
 /** Tables of entered items: those with a "Code" column and rows that have inputs. */
@@ -413,7 +428,7 @@ function findTariffResult(code: string, appeared: HTMLElement[], search: Element
 function press(el: HTMLElement): void {
   const caption = clickCaptions(el).find((c) => FORBIDDEN_CLICK.test(c));
   if (caption) throw new Error(`Refused to click "${caption}" — the extension never saves, submits or removes.`);
-  el.scrollIntoView({ block: 'center' });
+  el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   const init = { bubbles: true, cancelable: true };
   if (typeof PointerEvent === 'function') el.dispatchEvent(new PointerEvent('pointerdown', init));
   el.dispatchEvent(new MouseEvent('mousedown', init));
@@ -456,7 +471,7 @@ function describeAppeared(appeared: HTMLElement[]): string {
 
 /** Types into a search box and keeps focus there — many result lists close on blur. */
 function typeInto(control: HTMLInputElement, value: string): void {
-  control.focus();
+  control.focus({ preventScroll: true });
   setNativeValue(control, value);
   control.dispatchEvent(new Event('input', { bubbles: true }));
   control.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: value.slice(-1) || 'Backspace' }));
@@ -505,14 +520,35 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
     try {
       // After a change of tariff type the site first loads that tariff's list —
       // the code is typed again until the list is there to be filtered.
-      let hit: HTMLElement | null = null;
-      for (let attempt = 0; attempt < (switched ? 4 : 1) && !hit; attempt++) {
-        if (attempt) typeInto(search, '');
-        typeInto(search, code);
-        hit = await waitFor(() => findTariffResult(code, appeared, search), 3000);
+      const look = async (tries: number): Promise<HTMLElement | null> => {
+        for (let attempt = 0; attempt < tries; attempt++) {
+          if (attempt) typeInto(search, '');
+          typeInto(search, code);
+          const result = await waitFor(() => findTariffResult(code, appeared, search), 3000);
+          if (result) return result;
+        }
+        return null;
+      };
+      let hit = await look(switched ? 4 : 1);
+      // Nothing found: choose the type again, as a person would, so the list
+      // reloads, and search once more. The site shows the same text ("No tariff
+      // items. Select a tariff type above to load.") for a list that is not
+      // loaded and for a code that is not in it (690A in EHS Ax-V), so a
+      // second look is the only way to tell them apart.
+      if (!hit && !switched) {
+        if (Array.from(typeSelect.options).some((o) => o.value === '')) {
+          fillControl(typeSelect, '');
+          await sleep(300);
+        }
+        fillControl(typeSelect, wanted.value);
+        await sleep(700);
+        hit = await look(4);
       }
       const picked = hit ? null : pickNative(code, search, typeSelect);
-      if (hit) press(hit);
+      if (hit) {
+        await sleep(PACE.part);
+        press(hit);
+      }
       if (hit || picked) {
         found = await waitFor(() => rowWithCode(code), 2500);
         if (!found) {
@@ -544,25 +580,295 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
   }
 
   const problems: string[] = [];
+  await sleep(PACE.part);
   const qtyControl = cellControl(found.t, found.row, 'Qty|Quantity');
   if (qtyControl && !isLocked(qtyControl)) {
     const e = setValue(qtyControl, String(qty));
     if (e) problems.push(`quantity: ${e}`);
   } else if (qty !== 1) problems.push(`quantity ${qty} could not be typed (column locked or missing)`);
+  await sleep(PACE.part);
   const amountControl = cellControl(found.t, found.row, 'claimed');
+  /** The site's own figure, when it would not keep the bill's (it caps the claim at its tariff). */
+  let siteAmount: number | null = null;
   if (amountControl && !isLocked(amountControl)) {
     const e = setValue(amountControl, String(amountClaimed));
-    if (e) problems.push(`amount: ${e}`);
+    const kept = amountControl.value.trim() ? Number(amountControl.value) : NaN;
+    if (e && Number.isFinite(kept)) {
+      // The row is on the bill and the amount is the site's decision — for the person to check, not a failure.
+      siteAmount = kept;
+      flash(amountControl, OUTLINE.focus, 2500);
+    } else if (e) problems.push(`amount: ${e}`);
   } else problems.push(`the "claimed by hospital" amount could not be typed (columns: ${found.t.headers.join(' | ')})`);
   if (problems.length) throw new Error(`${code} is on the bill, but ${problems.join('; ')}`);
 
   const rate = Number(cellControl(found.t, found.row, 'rate')?.value);
   const differs = Number.isFinite(rate) && rate > 0 && Math.abs(rate * qty - amountClaimed) > 0.5;
+  const siteTariff = differs ? `the site's tariff is ${rate} × ${qty} = ${Math.round(rate * qty * 100) / 100}` : '';
+  if (siteAmount != null) {
+    return { message: `the site set the amount claimed to ${siteAmount}, the bill claims ${amountClaimed}${siteTariff ? ` — ${siteTariff}` : ''} (${via})`, warn: true };
+  }
   return {
-    message: differs
-      ? `the site's tariff is ${rate} × ${qty} = ${Math.round(rate * qty * 100) / 100}, the bill claims ${amountClaimed} (${via})`
-      : `${code} (${via}) qty ${qty}, claimed ${amountClaimed}`,
+    message: differs ? `${siteTariff}, the bill claims ${amountClaimed} (${via})` : `${code} (${via}) qty ${qty}, claimed ${amountClaimed}`,
     warn: differs,
+  };
+}
+
+// ------------------------------------- PM-JAY Treatment Plan (procedures)
+
+const PROCEDURE_LABEL = '^\\s*Procedure\\s*:?\\s*$';
+const UNITS_LABEL = 'No\\.?\\s*of\\s*Days\\s*\\/?\\s*Units';
+const ICHI_LABEL = '^\\s*ICHI\\s*Code\\s*:?\\s*$';
+const PROBLEM_TEXT = '.invalid-feedback, .text-danger, .error, .error-message, [role="alert"], .toast, .alert, mat-error, .swal2-popup, .ng-invalid ~ small';
+
+const escapeRx = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The site lists procedures as "Haemodialysis(NU116-None)": the entry ends with (code-stratification). */
+const procedureEntry = (code: string) => new RegExp(`\\(\\s*${escapeRx(code)}\\s*-[^()]*\\)\\s*$`, 'i');
+
+/** The visible element whose own text is this form label — never a table heading with the same word. */
+function formLabel(pattern: string): HTMLElement | null {
+  const r = rx(pattern);
+  return Array.from(document.querySelectorAll<HTMLElement>('label, span, div, p, td, strong, b, h5, h6, dt'))
+    .find((el) => isVisible(el) && !el.closest('th, thead') && r.test(ownText(el))) ?? null;
+}
+
+/** area: the block the dropdown was found in — where the chosen entry shows once picked. */
+type Widget = { kind: 'select'; el: HTMLSelectElement } | { kind: 'combo'; box: HTMLElement; input: HTMLInputElement | null; area: Element };
+
+const CUSTOM_DROPDOWN = '[role="combobox"], ng-select, .ng-select, .p-dropdown, mat-select, [class*="select" i], [class*="dropdown" i]';
+
+/**
+ * The dropdown a label stands for: a native <select>, or a custom one (ng-select,
+ * PrimeNG, Material…) — its outer box and the input it searches with, if any.
+ * The first one after the label in its block, looking a few levels up.
+ */
+function dropdownAfter(label: HTMLElement): Widget | null {
+  const follows = (el: Element) => !label.contains(el) && Boolean(label.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+  let container: Element | null = label;
+  for (let level = 1; level <= 4 && container; level++) {
+    container = container.parentElement;
+    if (!container) break;
+    const first = Array.from(container.querySelectorAll<HTMLElement>(`select, ${CUSTOM_DROPDOWN}`)).find((el) => follows(el) && isVisible(el));
+    if (!first) continue;
+    if (first instanceof HTMLSelectElement) return { kind: 'select', el: first };
+    // A styled box over a real <select> (select2 and the like): the <select> is what the page reads.
+    const native = first.querySelector('select');
+    if (native) return { kind: 'select', el: native };
+    let box = first;
+    for (let up = first.parentElement; up && up !== container && up.matches(CUSTOM_DROPDOWN); up = up.parentElement) box = up;
+    // react-select: the element found is the search input itself.
+    const input = box instanceof HTMLInputElement ? box : box.querySelector<HTMLInputElement>('input:not([type=hidden])');
+    return { kind: 'combo', box, input, area: container };
+  }
+  return null;
+}
+
+/** The first visible control after `anchor` in its block — locked or not, so a locked box is never skipped for the next one. */
+function controlNextTo(anchor: Element, levels: number): Control | null {
+  let container: Element | null = anchor;
+  for (let i = 0; i < levels && container; i++) container = container.parentElement;
+  if (!container) return null;
+  return Array.from(container.querySelectorAll<Control>(CONTROL_SELECTOR))
+    .find((c) => isVisible(c) && !anchor.contains(c) && Boolean(anchor.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING)) ?? null;
+}
+
+/** Opens a custom dropdown the way a person does: a press on its visible text, which the box's own handlers hear. */
+function openDropdown(box: HTMLElement): void {
+  box.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  const r = box.getBoundingClientRect();
+  const at = document.elementFromPoint(r.left + Math.min(r.width / 2, 40), r.top + r.height / 2);
+  press(at instanceof HTMLElement && box.contains(at) ? at : box);
+}
+
+/** The Treatment Plan table: the one with "Procedure" and "Days/Units" columns. */
+function treatmentTable(): { table: HTMLTableElement; procedureColumn: number } | null {
+  for (const table of Array.from(document.querySelectorAll('table'))) {
+    if (!isVisible(table)) continue;
+    const headers = Array.from((table.tHead?.rows[0] ?? table.rows[0])?.cells ?? []).map((c) => norm(c.textContent));
+    const procedureColumn = headers.findIndex((h) => /^procedure$/i.test(h));
+    if (procedureColumn >= 0 && headers.some((h) => /days\s*\/\s*units/i.test(h))) return { table, procedureColumn };
+  }
+  return null;
+}
+
+const treatmentRows = (t: { table: HTMLTableElement }) => Array.from(t.table.tBodies).flatMap((b) => Array.from(b.rows)).filter((r) => r.cells.length > 1);
+
+/**
+ * A table row that looks like this entry. The site shows only the first ~15
+ * characters of a long name ("Haemodialysis /...Show More"), so a shortened
+ * name that matches may still be a different procedure — exact: false.
+ */
+function rowLike(name: string): { shown: string; exact: boolean } | null {
+  const t = treatmentTable();
+  if (!t) return null;
+  const wanted = norm(name).toLowerCase();
+  for (const row of treatmentRows(t)) {
+    const raw = norm(row.cells[t.procedureColumn]?.textContent);
+    const shortened = /show\s*more\s*$/i.test(raw);
+    const shown = raw.replace(/\.{2,}\s*show\s*more\s*$/i, '').replace(/[\s/(]+$/, '').toLowerCase();
+    if (!shortened && shown === wanted) return { shown, exact: true };
+    if (shortened && shown.length >= 4 && wanted.startsWith(shown)) return { shown, exact: false };
+  }
+  return null;
+}
+
+/** Not added because the table seems to have it — always shown to the person, never a quiet tick. */
+function skippedAsPresent(code: string, like: { shown: string; exact: boolean }) {
+  return {
+    message: like.exact
+      ? `${code} is already in the Treatment Plan — not added again`
+      : `a row starting "${like.shown}…" is already in the Treatment Plan — it may be ${code}, so it was not added; check the table`,
+    warn: true,
+    skipped: true,
+  };
+}
+
+/** Messages the site shows next to fields or as a pop-up — why "+" did not add a row. */
+function problemsShown(): string {
+  return Array.from(document.querySelectorAll<HTMLElement>(PROBLEM_TEXT))
+    .filter((el) => isVisible(el) && textOf(el))
+    .map((el) => textOf(el).slice(0, 120))
+    .filter((t, i, all) => all.indexOf(t) === i)
+    .slice(0, 3)
+    .join(' | ');
+}
+
+/**
+ * The "+" that adds the treatment: the icon in the ICHI Code row after the ICHI
+ * field, in its own column (PM-JAY draws it as a bare icon — no caption, and
+ * hashed class names that say nothing). Outside the table, never in a dropdown.
+ */
+function addRowButton(): Element | null {
+  const label = formLabel(ICHI_LABEL) ?? formLabel(UNITS_LABEL);
+  if (!label) return null;
+  const follows = (a: Node, el: Element) => !a.contains(el) && Boolean(a.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+  // The row: the nearest block around the label that also holds its field.
+  let row: Element | null = label;
+  let field: Element | undefined;
+  for (let level = 1; level <= 4 && row && !field; level++) {
+    row = row.parentElement;
+    field = row ? Array.from(row.querySelectorAll('input:not([type=hidden]), select, textarea, [role="combobox"]')).find((el) => follows(label, el)) : undefined;
+  }
+  if (!row || !field) return null;
+  // The field's own column (a dropdown's arrow lives there) is not the "+".
+  let fieldCell: Element = field;
+  while (fieldCell.parentElement && fieldCell.parentElement !== row) fieldCell = fieldCell.parentElement;
+  const caption = (el: Element) => textOf(el);
+  const candidates = Array.from(row.querySelectorAll<Element>('button, [role="button"], a, svg, img, i, span, div'))
+    .filter((el) => follows(field!, el) && !fieldCell.contains(el) && isVisible(el) && !el.closest('table') && !isForbidden(el))
+    .filter((el) => /^(\+|add(_circle(_outline)?|_box)?)?$/i.test(caption(el)))
+    .filter((el) => el.matches('button, [role="button"], a, svg, img, i') || (el instanceof HTMLElement && hasPointer(el)));
+  // Its markup says plus / add as a word ("fa-plus", "btn-add" — not "padding"), else a real button, else the first icon.
+  return candidates.find((el) => /\b(plus|add)\b/i.test(el.outerHTML.slice(0, 400)))
+    ?? candidates.find((el) => el.matches('button, [role="button"], a'))
+    ?? candidates[0]
+    ?? null;
+}
+
+/** Presses what is drawn at the middle of `el`, so whichever element listens (icon, its wrapper) hears it. */
+function pressCentre(el: Element): void {
+  el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  const r = el.getBoundingClientRect();
+  const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  const target = at instanceof HTMLElement && (el.contains(at) || at.contains(el)) ? at : el;
+  if (target instanceof HTMLElement) press(target);
+  else target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+}
+
+/**
+ * Adds one procedure to the Treatment Plan: picks the entry ending "(code-…)"
+ * in Procedure, types No. of Days/Units, presses "+" and waits for the new row.
+ * A code with several entries (stratifications) is never guessed, and an entry
+ * already in the table is not added twice.
+ */
+async function addProcedure(code: string, units: number): Promise<{ message: string; warn: boolean; skipped?: boolean }> {
+  const label = await waitFor(() => formLabel(PROCEDURE_LABEL), 3000);
+  const widget = label ? dropdownAfter(label) : null;
+  if (!widget) {
+    throw new StepStopped('The Treatment Plan\'s "Procedure" box was not found — open the case and expand "Treatment Plan" on the site, then press Fill again');
+  }
+  const entry = procedureEntry(code);
+  let name: string;
+
+  if (widget.kind === 'select') {
+    const matches = Array.from(widget.el.options).filter((o) => o.value !== '' && entry.test(norm(o.text)));
+    if (matches.length !== 1) {
+      throw new Error(matches.length ? `${matches.length} entries for ${code}: ${matches.map((o) => norm(o.text)).join(' / ')} — choose one yourself` : `${code} is not in the site's Procedure list`);
+    }
+    name = norm(matches[0].text).replace(entry, '').trim();
+    const like = rowLike(name);
+    if (like) return skippedAsPresent(code, like);
+    const e = fillControl(widget.el, matches[0].value);
+    if (e) throw new Error(`Procedure: ${e}`);
+  } else {
+    openDropdown(widget.box);
+    await sleep(PACE.part);
+    // The search box is in the dropdown, or opens with it (focused).
+    const active = document.activeElement;
+    const search = widget.input ?? (active instanceof HTMLInputElement ? active : null);
+    if (search) typeInto(search, code);
+    // The list can be slow to filter on a busy day — a false "not in the list" is worse than a short wait.
+    const options = await waitFor(() => {
+      const hits = textLeaves(entry, 250).filter((el) => !el.closest('table'));
+      return hits.length ? hits : null;
+    }, 6000);
+    const close = () => (search ?? widget.box).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    if (!options) {
+      close();
+      throw new Error(`${code} is not in the site's Procedure list${search ? '' : ' (no search box was found in the list)'}`);
+    }
+    const texts = [...new Set(options.map(textOf))];
+    if (texts.length > 1) {
+      close();
+      throw new Error(`${texts.length} entries for ${code}: ${texts.join(' / ')} — choose one yourself`);
+    }
+    name = texts[0].replace(entry, '').trim();
+    const like = rowLike(name);
+    if (like) {
+      close();
+      return skippedAsPresent(code, like);
+    }
+    await sleep(PACE.part);
+    const picked = options[0];
+    press(picked);
+    // Taken when the list has closed and the box shows the entry ("…(NU116-None)").
+    const named = new RegExp(`\\(\\s*${escapeRx(code)}\\s*-`, 'i');
+    const shows = await waitFor(() => !picked.isConnected && named.test(widget.area.textContent || ''), 2500);
+    if (!shows) {
+      close();
+      throw new Error(`${code} was chosen in the Procedure list, but the box does not show it — nothing was added`);
+    }
+    await sleep(PACE.part);
+  }
+
+  // No. of Days/Units — some procedures are fixed at 1 by the site.
+  const notes: string[] = [];
+  const unitsLabel = formLabel(UNITS_LABEL);
+  const unitsBox = unitsLabel ? controlNextTo(unitsLabel, 2) ?? controlNextTo(unitsLabel, 3) : null;
+  if (unitsBox && !isLocked(unitsBox)) {
+    const e = setValue(unitsBox, String(units));
+    if (e) notes.push(`Days/Units: ${e}`);
+  } else if (units !== 1) {
+    notes.push(`Days/Units could not be typed (the site ${unitsBox ? 'locks it' : 'shows no such box'}) — the bill has ${units}`);
+  }
+  await sleep(PACE.part);
+
+  const t = treatmentTable();
+  const before = t ? treatmentRows(t).length : 0;
+  const add = addRowButton();
+  if (!add) throw new StepStopped('The "+" button next to ICHI Code was not found, so nothing was added (the page layout has been saved for the developer)');
+  pressCentre(add);
+  const grew = await waitFor(() => {
+    const now = treatmentTable();
+    return now && treatmentRows(now).length > before;
+  }, 4000);
+  if (!grew) {
+    const shown = problemsShown();
+    throw new Error(`"+" did not add ${code} to the table${shown ? ` — the site says: ${shown}` : ''}`);
+  }
+  return {
+    message: `${code} ${name.slice(0, 60)} — ${units} unit(s)${notes.length ? ` — ${notes.join('; ')}` : ''}`,
+    warn: notes.length > 0,
   };
 }
 
@@ -572,6 +878,7 @@ export async function runActions(actions: PageAction[]): Promise<ActionResult[]>
     try {
       let message: string;
       let warn = false;
+      let skipped: boolean | undefined;
       switch (a.type) {
         case 'clickTab': message = await clickTab(a.text, a.next); break;
         case 'clickButton': message = await clickButton(a.text); break;
@@ -579,9 +886,10 @@ export async function runActions(actions: PageAction[]): Promise<ActionResult[]>
         case 'ensureRows': message = await ensureRows(a.headers, a.count, a.addButton); break;
         case 'setCell': message = await setCell(a.headers, a.row, a.column, a.value, a.optionMatch); break;
         case 'addTariffItem': ({ message, warn } = await addTariffItem(a.code, a.tariff, a.qty, a.amountClaimed, a.tariffOption)); break;
+        case 'addProcedure': ({ message, warn, skipped } = await addProcedure(a.code, a.units)); break;
         default: throw new Error('Unknown action');
       }
-      results.push({ index, label: a.label, ok: true, message, ...(warn ? { warn } : {}) });
+      results.push({ index, label: a.label, ok: true, message, ...(warn ? { warn } : {}), ...(skipped ? { skipped } : {}) });
     } catch (err) {
       results.push({ index, label: a.label, ok: false, message: err instanceof Error ? err.message : String(err) });
       // Fewer results than actions tells the panel the step stopped. A tab that
@@ -589,7 +897,7 @@ export async function runActions(actions: PageAction[]): Promise<ActionResult[]>
       // person may have the tab open already, and the rows that exist still fill.
       if (err instanceof StepStopped) break;
     }
-    await sleep(120);
+    await sleep(PACE.step);
   }
   return results;
 }

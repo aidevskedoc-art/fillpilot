@@ -37,7 +37,8 @@ export function fillControl(target: Target, value: string): string | null {
 
   if (el instanceof HTMLSelectElement) {
     if (!Array.from(el.options).some((o) => o.value === value)) return `No option "${value}" on the page`;
-    el.focus();
+    // preventScroll: filling a list of fields must not bounce the page to each one.
+    el.focus({ preventScroll: true });
     setNativeValue(el, value);
     fire(el, 'input');
     fire(el, 'change');
@@ -51,13 +52,16 @@ export function fillControl(target: Target, value: string): string | null {
     return el.checked === want ? null : 'The page did not accept the change';
   }
 
-  el.focus();
+  el.focus({ preventScroll: true });
   setNativeValue(el, value);
   fire(el, 'input');
   fire(el, 'change');
   el.blur();
+  if (el.value === value) return null;
+  // A number written the page's way ("600" shown as "600.00") is the same value.
+  if (value.trim() && el.value.trim() && Number(el.value) === Number(value)) return null;
   // Some inputs normalise (e.g. maxlength truncation, type=number) — report it.
-  return el.value === value ? null : `The page changed the value to "${el.value}"`;
+  return `The page changed the value to "${el.value}"`;
 }
 
 export const OUTLINE = { filled: '2px solid #14b8a6', failed: '2px solid #ef4444', focus: '3px solid #f59e0b' };

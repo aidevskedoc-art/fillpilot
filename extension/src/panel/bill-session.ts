@@ -5,19 +5,30 @@
 // emptied when the browser closes or the extension reloads. Keeping it there
 // rather than in the panel's own memory lets the panel be closed and reopened
 // in the middle of a bill.
-import type { TgnpdclClaim } from '../../../web/projects/shared/src/api-types';
+import type { PmjayClaim, TgnpdclClaim } from '../../../web/projects/shared/src/api-types';
 
-const KEY = 'pfa.bill';
+function session<T>(key: string) {
+  return {
+    async load(): Promise<T | null> {
+      const stored = await chrome.storage.session.get(key);
+      return (stored[key] as T | undefined) ?? null;
+    },
+    save(claim: T): Promise<void> {
+      return chrome.storage.session.set({ [key]: claim });
+    },
+    clear(): Promise<void> {
+      return chrome.storage.session.remove(key);
+    },
+  };
+}
 
-export const billSession = {
-  async load(): Promise<TgnpdclClaim | null> {
-    const stored = await chrome.storage.session.get(KEY);
-    return (stored[KEY] as TgnpdclClaim | undefined) ?? null;
-  },
-  save(claim: TgnpdclClaim): Promise<void> {
-    return chrome.storage.session.set({ [KEY]: claim });
-  },
-  clear(): Promise<void> {
-    return chrome.storage.session.remove(KEY);
-  },
-};
+/** TGNPDCL bill entry. */
+export const billSession = session<TgnpdclClaim>('pfa.bill');
+/** PM-JAY Treatment Plan — its own slot, so a bill loaded for one site never fills the other. */
+export const pmjaySession = session<PmjayClaim>('pfa.pmjay');
+/**
+ * The package codes the extension has added for that bill — so "Fill again"
+ * goes on with the rest instead of guessing from the shortened names in the
+ * site's table. `bill` ties the list to the bill it was made for.
+ */
+export const pmjayAdded = session<{ bill: string; codes: string[] }>('pfa.pmjay.added');
