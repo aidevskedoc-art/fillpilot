@@ -8,6 +8,7 @@
 //   manifest.json                   (__API_ORIGIN__ filled from API_BASE)
 //
 //   API_BASE=https://forms-api.example.com node build.mjs   (default http://localhost:4100)
+//   UPDATE_URL=…/extension/updates.xml                      (release.mjs: the packed release for Chrome's policy)
 //   node build.mjs --watch                                  (rebuild on change, unminified)
 //
 //   MODE=reader OUT_DIR=dist-reader node build.mjs
@@ -64,7 +65,9 @@ function copyStatic() {
   for (const file of ['index.html', 'panel.css']) fs.copyFileSync(path.join(src, 'panel', file), path.join(dist, 'panel', file));
   fs.cpSync(path.join(root, 'icons'), path.join(dist, 'icons'), { recursive: true, filter: (file) => !file.endsWith('.cjs') });
   fs.writeFileSync(path.join(dist, 'panel', 'config.json'), JSON.stringify(config, null, 2));
-  const manifest = fs.readFileSync(path.join(root, 'manifest.json'), 'utf8').replaceAll('__API_ORIGIN__', apiOrigin);
+  let manifest = fs.readFileSync(path.join(root, 'manifest.json'), 'utf8').replaceAll('__API_ORIGIN__', apiOrigin);
+  // A release for Chrome's force-install policy (release.mjs) says where its updates are.
+  if (process.env.UPDATE_URL) manifest = JSON.stringify({ ...JSON.parse(manifest), update_url: process.env.UPDATE_URL }, null, 2);
   fs.writeFileSync(path.join(dist, 'manifest.json'), manifest);
 }
 

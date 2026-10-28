@@ -47,6 +47,15 @@ app.use(express.json({ limit: '2mb' }));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
+// The packed extension for the team's PCs (fillpilot.crx + updates.xml, written
+// by extension/release.mjs). Chrome's Group Policy install and its update check
+// fetch these without a sign-in; they hold no data, only the extension's code.
+app.use('/extension', express.static(path.join(__dirname, '..', 'extension-release'), {
+  setHeaders: (res, file) => {
+    if (file.endsWith('.crx')) res.setHeader('Content-Type', 'application/x-chrome-extension');
+  },
+}));
+
 // Every /api route needs a signed-in user unless listed here — secure by default.
 app.use('/api', requireAuthExcept(['/api/health', '/api/auth/login']));
 

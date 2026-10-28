@@ -13,6 +13,9 @@ backend/test-fixtures/
 # Team reports exported by scripts/team-report.js (staff names and counts)
 backend/reports/
 
+# The packed extension served to the team's PCs (extension/release.mjs)
+backend/extension-release/
+
 # Generated extension signing key
 extension/key.pem
 

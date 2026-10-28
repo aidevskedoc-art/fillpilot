@@ -178,6 +178,29 @@ It is counts only, built from what is already recorded (`BILLS_READ` in
 through the extension with each person's own sign-in; the standalone package
 below has no server and is not counted.
 
+## Installing the extension on the team's PCs (Group Policy)
+
+For the hospital's domain PCs, IT installs FillPilot through Chrome's policy —
+no Developer mode, and every PC updates by itself.
+
+```powershell
+cd extension
+npm.cmd install                                    # once
+npm.cmd run release -- http://<server>:4100        # builds, packs with key.pem, writes updates.xml
+```
+
+`release.mjs` puts `fillpilot.crx` and `updates.xml` in `backend\extension-release\`,
+which the backend serves at `http://<server>:4100/extension/` (restart it after the
+first release), and prints the value for IT's Group Policy: Computer Configuration →
+Administrative Templates → Google → Google Chrome → Extensions → **Configure the list
+of force-installed apps and extensions** →
+`fjikihdjljokehgbcjdccbojpogdmadc;http://<server>:4100/extension/updates.xml`.
+Remove the Developer-mode copy from each PC first (same ID). For an update, raise
+`version` in `extension\manifest.json` and run the release again.
+
+**Keep a copy of `extension\key.pem`.** It fixes the extension ID; without it the
+installed extension can never be updated.
+
 ## Giving it to a PC that cannot install anything (the client package)
 
 ```powershell
