@@ -2,7 +2,8 @@
 // "New Medical Bill Entry" wizard needs. Pure: the route loads the documents.
 //
 // Tab 1 Room & Consultation   ward rows (rate/day, days), ICU days, doctors (name, days)
-// Tab 2 Investigations        tariff rows (code, qty, amount claimed by hospital); implants total
+// Tab 2 Investigations        tariff rows (code, qty, amount claimed by hospital); implants total;
+//                             the hospital's own codes (YSSH) apart — no tariff list has them
 // Tab 3 Pharmacy              rows (date, item, rate, qty) — the final bill only has a total
 // Tab 4 Summary               employee paid, concession, hospital bill number
 //
@@ -19,6 +20,14 @@ const ICU = /\bICU\b|INTENSIVE/i;
 const DOCTOR = /DOCTOR|CONSULTATION/i;
 const PHARMACY = /PHARMACY|MEDICINE\s*CHARGES/i;
 const IMPLANT = /IMPLANT|MEDICAL\s*APPLIANCE/i;
+
+/**
+ * A CGHS 2025 rate-list code (OM F.No.5-16/CGHS(HQ)/HEC/2024, 03.10.2025): the
+ * speciality's two letters + three digits — MG038, LB012, CN002. The bill
+ * prints it without a NIMS / COMM mark; the site lists it under
+ * "CGHS(2025)-Tier I".
+ */
+const CGHS_CODE = /^(AG|BC|BP|BT|BY|CA|CC|CI|CN|CP|CT|CV|DI|DP|EI|EP|GI|GP|GS|HC|HN|IT|LB|MG|NI|NM|NS|NU|OG|OI|OP|OR|PI|PP|PS|PT|RI|RP|RT|SK)\d{3}$/;
 
 function nameKey(name) {
   return normLabel(String(name || '').replace(/^(dr|mr|mrs|ms)\.?\s+/i, ''));
@@ -53,8 +62,16 @@ function buildTgnpdclClaim({ final, summary }) {
       addTo(byName, normLabel(g.name || g.section), g.subTotal);
       addTo(bySection, normLabel(g.section), g.subTotal);
     }
+    // The summary can print one name twice, a line per group (CARDIOLOGY 14,700
+    // and 1,11,550 on IP 129009), so its lines are added up by name as well.
+    const summaryByName = new Map();
     for (const c of summary.categories) {
       const key = normLabel(c.name);
+      const prev = summaryByName.get(key);
+      const amount = !prev ? c.amount : prev.amount == null || c.amount == null ? null : round2(prev.amount + c.amount);
+      summaryByName.set(key, { name: c.name, amount });
+    }
+    for (const [key, c] of summaryByName) {
       const amount = byName.has(key) ? byName.get(key) : bySection.get(key);
       if (amount === undefined) add('warning', `"${c.name}" (${c.amount}) is on the summary bill but not found on the final bill`);
       else if (!same(amount, c.amount)) add('error', `${c.name}: final bill ${amount} vs summary bill ${c.amount} — check this amount`);
@@ -68,7 +85,25 @@ function buildTgnpdclClaim({ final, summary }) {
   const speciality = summary?.patient?.consultantSpeciality;
 
   const room = { roomDays: 0, icuDays: 0, wards: [], doctors: [], numberOfDoctors: 0 };
-  const investigations = { items: [], implants: null };
+  const investigations = { items: [], implants: null, ownItems: [] };
+  // The hospital's own codes (YSSH) name many different items: identical lines are one row.
+  const ownByKey = new Map();
+  const addOwn = (item, source) => {
+    const qty = item.qty || 1;
+    const rate = item.rate ?? (item.amount != null ? round2(item.amount / qty) : null);
+    const key = `${item.code}|${normLabel(item.description)}|${rate}`;
+    let row = ownByKey.get(key);
+    if (!row) {
+      row = { code: item.code, description: item.description, qty: 0, rate, amountClaimed: 0, lines: 0, source, notes: [] };
+      ownByKey.set(key, row);
+      investigations.ownItems.push(row);
+    }
+    row.qty += qty;
+    row.lines += 1;
+    row.amountClaimed = round2(row.amountClaimed + (item.amount || 0));
+    for (const n of item.issues || []) if (!row.notes.includes(n)) row.notes.push(n);
+    if (rate == null && !row.notes.includes('Rate not readable — enter it yourself')) row.notes.push('Rate not readable — enter it yourself');
+  };
   const pharmacy = { total: null, rows: [], note: null };
   // Every section DOCTOR matches — the same test that keeps them out of
   // Investigations, so a "CONSULTATION CHARGES" section can't fall between the two.
@@ -112,10 +147,14 @@ function buildTgnpdclClaim({ final, summary }) {
           };
           continue;
         }
+        if (item.ownCode) {
+          addOwn(item, source);
+          continue;
+        }
         const codeOk = item.code && /^[A-Z]{0,3}\d+[A-Z]?$|^[A-Z]\d+(\.\d+)+$/.test(item.code);
         const row = {
           code: item.code,
-          tariff: item.tariff,
+          tariff: item.tariff ?? (CGHS_CODE.test(item.code || '') ? 'CGHS' : null),
           description: item.description,
           qty: item.qty || 1,
           amountClaimed: item.amount,
@@ -125,6 +164,8 @@ function buildTgnpdclClaim({ final, summary }) {
           // Only clean single tariff codes are searched on the site; the rest is entered by hand.
           manual: !codeOk,
           notes: [...(item.issues || [])],
+          // The other reading of a last character OCR cannot settle (78I / 781): the site's tariff list decides.
+          ...(item.codeAlternatives ? { alternatives: item.codeAlternatives } : {}),
         };
         if (!item.code) row.notes.push('No tariff code on the bill — pick the tariff item manually');
         else if (item.code.includes('+')) row.notes.push(`Combined code ${item.code} — enter its parts on the site`);
@@ -139,6 +180,13 @@ function buildTgnpdclClaim({ final, summary }) {
     }
   }
   investigations.items = mergeByCode(investigations.items);
+  // A reading that is another line's code on this bill is not an alternative: both items are on the bill.
+  const billCodes = new Set(investigations.items.map((r) => r.code).filter(Boolean));
+  for (const r of investigations.items) {
+    if (!r.alternatives) continue;
+    r.alternatives = r.alternatives.filter((a) => !billCodes.has(a));
+    if (!r.alternatives.length) delete r.alternatives;
+  }
 
   const doctorCount = new Map();
   for (const item of doctorItems) doctorCount.set(nameKey(item.description), (doctorCount.get(nameKey(item.description)) || 0) + 1);

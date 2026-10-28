@@ -37,12 +37,14 @@ function buildPmjayClaim({ final, summary }) {
     for (const g of section.groups) {
       const where = g.name && g.name !== section.name ? `${section.name} / ${g.name}` : section.name;
       for (const item of g.items) {
-        // Only a single code can be chosen in the Procedure list; "R171+171" is entered by hand.
-        if (!item.code || /[+/]/.test(item.code)) {
+        // Only a single code can be chosen in the Procedure list; "R171+171" is entered by
+        // hand, and so is the hospital's own code (YSSH), which is no package code.
+        if (!item.code || /[+/]/.test(item.code) || item.ownCode) {
           const key = `${where}|${item.description}`;
           let line = byLine.get(key);
           if (!line) {
-            line = { section: where, description: item.description, count: 0, amount: 0, reason: item.code ? `Combined code ${item.code}` : 'No code on the bill' };
+            const reason = !item.code ? 'No code on the bill' : item.ownCode ? `Hospital's own code ${item.code}` : `Combined code ${item.code}`;
+            line = { section: where, description: item.description, count: 0, amount: 0, reason };
             byLine.set(key, line);
             manual.push(line);
           }

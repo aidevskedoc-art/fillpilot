@@ -311,14 +311,26 @@ async function clickButton(pattern: string): Promise<string> {
   return `Clicked "${textOf(button)}"`;
 }
 
-async function setField(field: string, value: string, id?: string): Promise<string> {
+async function setField(field: string, value: string, id?: string, calendar = false): Promise<string> {
   const byId = () => (id ? fieldById(id) : null);
   const control = await waitFor(() => {
     const c = byId();
     return c && !isLocked(c) ? c : findField(field);
   }, 3000);
   if (!control) {
-    if (byId() || findField(field, true)) throw new Error(`"${readable(field)}" is locked on the site — it cannot be typed into right now`);
+    const locked = byId() || findField(field, true);
+    // A date box the site locks for typing because its calendar fills it: the
+    // value is written as the calendar writes it. A disabled box is never sent with the form — left alone.
+    if (locked && calendar && !locked.disabled && !(locked instanceof HTMLSelectElement)) {
+      setNativeValue(locked, value);
+      locked.dispatchEvent(new Event('input', { bubbles: true }));
+      locked.dispatchEvent(new Event('change', { bubbles: true }));
+      const ok = locked.value === value;
+      flash(locked, ok ? OUTLINE.filled : OUTLINE.failed, 2500);
+      if (!ok) throw new Error(`the site changed "${readable(field)}" to "${locked.value}"`);
+      return `${readable(field)} = ${value} (calendar box)`;
+    }
+    if (locked) throw new Error(`"${readable(field)}" is locked on the site — it cannot be typed into right now`);
     throw new Error(`Field "${readable(field)}" not found on the page — is the right tab open?`);
   }
   const error = setValue(control, value);
@@ -461,6 +473,19 @@ function pickNative(code: string, search: HTMLInputElement, typeSelect: Control 
   return null;
 }
 
+/**
+ * The price on a search result's line ("82A – C-Reactive Protein - CRP (₹750)"),
+ * or null when the line shows none. Only the result's own line is read — never a
+ * block that also holds other results' prices.
+ */
+function resultPrice(hit: HTMLElement, code: string): number | null {
+  const parent = hit.parentElement;
+  const line = hit.closest<HTMLElement>('tr, li, [role="option"], .list-group-item, .dropdown-item')
+    ?? (parent && textOf(parent).length <= 200 && codeToken(code).test(textOf(parent)) ? parent : hit);
+  const m = /(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)/i.exec(textOf(line));
+  return m ? Number(m[1].replace(/,/g, '')) : null;
+}
+
 /** What the page added after typing — tells how this site shows its search results. */
 function describeAppeared(appeared: HTMLElement[]): string {
   const live = appeared.filter((el) => el.isConnected && isVisible(el) && textOf(el));
@@ -484,9 +509,27 @@ function typeInto(control: HTMLInputElement, value: string): void {
  * the site's type that `option` names is searched (the site profile maps the
  * bill's tariff mark to it). The site's own rate for the item is compared
  * with the bill — many differences mean the wrong tariff type is mapped.
+ *
+ * `alternatives` are other readings of the code where OCR cannot tell I from 1
+ * (78I / 781). Both may be real items, so the bill's rate decides: the reading
+ * whose price on the site is the bill's rate is added. When no price settles it,
+ * the bill's reading is kept (or the one the site has) and the step is marked
+ * for the person to check.
  */
-async function addTariffItem(code: string, tariff: string | null, qty: number, amountClaimed: number, option?: string | null): Promise<{ message: string; warn: boolean }> {
-  let found = rowWithCode(code);
+async function addTariffItem(code: string, tariff: string | null, qty: number, amountClaimed: number, option?: string | null, alternatives: string[] = []): Promise<{ message: string; warn: boolean }> {
+  const readings = [code, ...alternatives.filter((c) => c.toUpperCase() !== code.toUpperCase())];
+  /** The reading that went on the bill, and why it needs checking when that is not certain. */
+  let used = code;
+  let doubt = '';
+  let found: BillRow | null = null;
+  for (const c of readings) {
+    found = rowWithCode(c);
+    if (found) {
+      used = c;
+      if (c !== code) doubt = `the bill reads ${code}; ${c} is already on the site's bill — check it is the same item`;
+      break;
+    }
+  }
   let via = 'already on the bill';
 
   if (!found) {
@@ -502,7 +545,10 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
     const options = Array.from(typeSelect.options).filter((o) => o.value !== '');
     const wanted = option ? options.find((o) => rx(option).test(norm(o.text))) : null;
     if (!wanted) {
-      throw new Error(`The bill marks this code "${tariff ?? 'no tariff'}" and it is not known which of the site's tariff types that is (${options.map((o) => norm(o.text)).join(' / ')}) — enter it yourself`);
+      const types = options.map((o) => norm(o.text)).join(' / ');
+      throw new Error(option
+        ? `The bill marks this code "${tariff}", but none of the site's tariff types (${types}) matches the one expected for it (${readable(option)}) — enter it yourself`
+        : `The bill marks this code "${tariff ?? 'no tariff'}" and it is not known which of the site's tariff types that is (${types}) — enter it yourself`);
     }
     const switched = typeSelect.value !== wanted.value;
     if (switched) {
@@ -520,11 +566,11 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
     try {
       // After a change of tariff type the site first loads that tariff's list —
       // the code is typed again until the list is there to be filtered.
-      const look = async (tries: number): Promise<HTMLElement | null> => {
+      const look = async (tries: number, c = code): Promise<HTMLElement | null> => {
         for (let attempt = 0; attempt < tries; attempt++) {
           if (attempt) typeInto(search, '');
-          typeInto(search, code);
-          const result = await waitFor(() => findTariffResult(code, appeared, search), 3000);
+          typeInto(search, c);
+          const result = await waitFor(() => findTariffResult(c, appeared, search), 3000);
           if (result) return result;
         }
         return null;
@@ -544,13 +590,54 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
         await sleep(700);
         hit = await look(4);
       }
-      const picked = hit ? null : pickNative(code, search, typeSelect);
+      if (readings.length > 1) {
+        // 78I or 781: the reading whose price on the site is the bill's rate.
+        const rate = qty ? Math.round((amountClaimed / qty) * 100) / 100 : null;
+        const fits = (price: number | null) => price != null && rate != null && Math.abs(price - rate) <= 0.5;
+        const seen: { c: string; price: number | null }[] = hit ? [{ c: code, price: resultPrice(hit, code) }] : [];
+        let typedOther = false;
+        for (const alt of readings.slice(1)) {
+          if (seen.some((s) => fits(s.price))) break;
+          typedOther = true;
+          const altHit = await look(2, alt);
+          if (altHit) seen.push({ c: alt, price: resultPrice(altHit, alt) });
+        }
+        const choice = seen.find((s) => fits(s.price)) ?? seen[0];
+        if (choice) {
+          used = choice.c;
+          const price = (s: { c: string; price: number | null }) => `${s.c}${s.price != null ? ` is ₹${s.price}` : ''}`;
+          const others = seen.filter((s) => s !== choice);
+          const absent = readings.filter((c) => !seen.some((s) => s.c === c));
+          if (fits(choice.price)) {
+            if (used !== code) {
+              doubt = `the bill reads ${code}, but ${price(choice)} — the bill's rate (${others.length ? others.map(price).join(', ') : `${code} is not in ${via}`}) — check the code on the bill`;
+            }
+          } else if (others.length) {
+            doubt = `the bill reads ${code}; OCR cannot tell I from 1 here and the site's prices do not settle it (${seen.map(price).join(', ')}, the bill's rate is ₹${rate}) — ${used} was added, check it is the right item`;
+          } else if (used !== code) {
+            doubt = `the bill reads ${code}, which is not in ${via}${absent.length > 1 ? ` (nor ${absent.filter((c) => c !== code).join(', ')})` : ''}; ${used} was added — check it is the right item`;
+          }
+          // Typing another reading replaced the result list: search the chosen one again.
+          if (typedOther) hit = await look(2, used);
+        }
+      }
+      let picked: string | null = null;
+      if (!hit) {
+        for (const c of readings) {
+          picked = pickNative(c, search, typeSelect);
+          if (picked) {
+            used = c;
+            if (c !== code) doubt = `the bill reads ${code}, which is not in ${via}; ${c} was chosen — check it is the right item`;
+            break;
+          }
+        }
+      }
       if (hit) {
         await sleep(PACE.part);
         press(hit);
       }
       if (hit || picked) {
-        found = await waitFor(() => rowWithCode(code), 2500);
+        found = await waitFor(() => rowWithCode(used), 2500);
         if (!found) {
           // A result line with its own "Add" button — only the one on that line, never
           // another result's. After a native choice the form may wait for its "Add".
@@ -562,15 +649,15 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
             : buttons.find((b) => near(search, b) && rx(ADD_BUTTON).test(textOf(b)));
           if (add) {
             safeClick(add);
-            found = await waitFor(() => rowWithCode(code), 2500);
+            found = await waitFor(() => rowWithCode(used), 2500);
           }
         }
         if (!found) {
           const tables = billTables().map((t) => `[${t.headers.join(' | ')}] ${dataRows(t).length} row(s)`).join('; ') || 'no table with a Code column';
-          failure = `chose "${(hit ? textOf(hit) : picked || '').slice(0, 70)}" but no row with code ${code} appeared (tables: ${tables})`;
+          failure = `chose "${(hit ? textOf(hit) : picked || '').slice(0, 70)}" but no row with code ${used} appeared (tables: ${tables})`;
         }
       } else {
-        failure = `no search result for ${code} in ${via} — ${describeAppeared(appeared)}`;
+        failure = `no search result for ${readings.join(' or ')} in ${via} — ${describeAppeared(appeared)}`;
       }
     } finally {
       observer.disconnect();
@@ -599,17 +686,18 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
       flash(amountControl, OUTLINE.focus, 2500);
     } else if (e) problems.push(`amount: ${e}`);
   } else problems.push(`the "claimed by hospital" amount could not be typed (columns: ${found.t.headers.join(' | ')})`);
-  if (problems.length) throw new Error(`${code} is on the bill, but ${problems.join('; ')}`);
+  if (problems.length) throw new Error(`${doubt ? `${doubt}. ` : ''}${used} is on the bill, but ${problems.join('; ')}`);
 
   const rate = Number(cellControl(found.t, found.row, 'rate')?.value);
   const differs = Number.isFinite(rate) && rate > 0 && Math.abs(rate * qty - amountClaimed) > 0.5;
   const siteTariff = differs ? `the site's tariff is ${rate} × ${qty} = ${Math.round(rate * qty * 100) / 100}` : '';
+  const withDoubt = (message: string) => (doubt ? `${used}: ${doubt}. ${message}` : message);
   if (siteAmount != null) {
-    return { message: `the site set the amount claimed to ${siteAmount}, the bill claims ${amountClaimed}${siteTariff ? ` — ${siteTariff}` : ''} (${via})`, warn: true };
+    return { message: withDoubt(`the site set the amount claimed to ${siteAmount}, the bill claims ${amountClaimed}${siteTariff ? ` — ${siteTariff}` : ''} (${via})`), warn: true };
   }
   return {
-    message: differs ? `${siteTariff}, the bill claims ${amountClaimed} (${via})` : `${code} (${via}) qty ${qty}, claimed ${amountClaimed}`,
-    warn: differs,
+    message: withDoubt(differs ? `${siteTariff}, the bill claims ${amountClaimed} (${via})` : `${used} (${via}) qty ${qty}, claimed ${amountClaimed}`),
+    warn: differs || Boolean(doubt),
   };
 }
 
@@ -872,6 +960,436 @@ async function addProcedure(code: string, units: number): Promise<{ message: str
   };
 }
 
+// ------------------------------- Coal India Bill Details (CGHS / Unlisted rows)
+
+/**
+ * e-Arogya Suvidha lists its rows under red "Category -: CGHS List Items"
+ * headings, outside the table that holds the column headings — so a section is
+ * everything between its heading and the next one, and a row is the boxes on
+ * one line. Left to right, the drop-down list left out: code, name, quantity,
+ * rate, hospital amount, entitled amount, remarks.
+ */
+const CIL_HEADING = '^\\s*Category\\s*[-–:]+\\s*';
+const CIL_SECTION = { cghs: 'CGHS\\s*List\\s*Items', unlisted: 'Unlisted\\s*Procedures' } as const;
+const CIL_SECTION_NAME = { cghs: 'CGHS List Items', unlisted: 'Unlisted Procedures' } as const;
+const CIL_COL = { code: 0, name: 1, qty: 2, rate: 3, hospital: 4, entitled: 5, remarks: 6 } as const;
+const CIL_BOXES = 7;
+/** What an icon's markup says: "+" adds a row, the red cross deletes one — and is never pressed. */
+const ADD_ICON = /add|plus|insert/i;
+const DELETE_ICON = /del|remov|cross|minus|trash|close|cancel|clear/i;
+
+type TextBox = HTMLInputElement | HTMLTextAreaElement;
+type CilSectionKey = keyof typeof CIL_SECTION;
+
+interface CilSection {
+  heading: HTMLElement;
+  /** The next "Category -:" heading — where this section ends. */
+  end: HTMLElement | null;
+  rows: TextBox[][];
+}
+
+const isAfter = (a: Node, b: Node) => a !== b && !a.contains(b) && Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+const within = (s: { heading: Element; end: Element | null }, el: Element) => isAfter(s.heading, el) && (!s.end || isAfter(el, s.end));
+
+/** Elements grouped by the line they sit on, top to bottom, each line left to right. */
+function byLine<T extends Element>(els: T[]): T[][] {
+  const lines: { mid: number; items: T[] }[] = [];
+  for (const el of els) {
+    const r = el.getBoundingClientRect();
+    const mid = r.top + r.height / 2;
+    const line = lines.find((l) => Math.abs(l.mid - mid) < Math.max(6, r.height / 2));
+    if (line) line.items.push(el);
+    else lines.push({ mid, items: [el] });
+  }
+  return lines
+    .sort((a, b) => a.mid - b.mid)
+    .map((l) => l.items.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left));
+}
+
+function cilSection(key: CilSectionKey): CilSection | null {
+  const heading = textLeaves(rx(CIL_HEADING + CIL_SECTION[key]), 80)[0];
+  if (!heading) return null;
+  const end = textLeaves(rx(CIL_HEADING), 80).find((el) => isAfter(heading, el)) ?? null;
+  const section = { heading, end };
+  const boxes = Array.from(document.querySelectorAll<Control>(CONTROL_SELECTOR)).filter(
+    (c): c is TextBox => !(c instanceof HTMLSelectElement) && !/^(checkbox|radio)$/i.test(c.type) && isVisible(c) && within(section, c),
+  );
+  return { ...section, rows: byLine(boxes) };
+}
+
+/** An icon's own markup and that of the link or button around it (file name, alt, title, class, handler). */
+function iconWords(el: Element): string {
+  const attrs = (n: Element | null) =>
+    n
+      ? ['src', 'alt', 'title', 'id', 'class', 'name', 'aria-label', 'onclick', 'href']
+        .map((a) => {
+          const v = n.getAttribute(a) || '';
+          if (a === 'src') return v.split(/[\\/]/).pop() || '';
+          return a === 'href' && !/^javascript:/i.test(v) ? '' : v;
+        })
+        .join(' ')
+      : '';
+  return norm(`${attrs(el)} ${attrs(el.closest('a, button'))} ${attrs(el.querySelector('img'))}`).slice(0, 300);
+}
+
+/**
+ * Blue or red, from the picture itself — the site draws "+" in a blue circle
+ * and the delete cross in red. null for a picture that cannot be read (from
+ * another site) or that is neither.
+ */
+function iconHue(el: Element): 'blue' | 'red' | null {
+  const img = el instanceof HTMLImageElement ? el : el.querySelector('img');
+  if (!img || !img.complete || !img.naturalWidth) return null;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 16;
+    canvas.height = 16;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0, 16, 16);
+    const { data } = ctx.getImageData(0, 0, 16, 16);
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      // Coloured pixels only: transparent, white and grey ones say nothing about the icon.
+      if (data[i + 3] < 128 || Math.max(data[i], data[i + 1], data[i + 2]) - Math.min(data[i], data[i + 1], data[i + 2]) < 40) continue;
+      r += data[i];
+      g += data[i + 1];
+      b += data[i + 2];
+    }
+    if (b > 1.3 * r && b > g) return 'blue';
+    if (r > 1.3 * b && r > g) return 'red';
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Captionless icons right of `row`'s last box, on its line, innermost first. */
+function iconsAfter(row: TextBox[], s: CilSection): HTMLElement[] {
+  const last = row[row.length - 1].getBoundingClientRect();
+  const icons = Array.from(document.querySelectorAll<HTMLElement>('img, input[type="image"], a, button, [role="button"], i, span'))
+    .filter((el) => within(s, el) && isVisible(el) && !textOf(el) && !isForbidden(el))
+    .filter((el) => {
+      const r = el.getBoundingClientRect();
+      const mid = r.top + r.height / 2;
+      return r.left >= last.right - 2 && mid > last.top - 4 && mid < last.bottom + 4;
+    });
+  return icons.filter((el) => !icons.some((other) => other !== el && el.contains(other)));
+}
+
+/**
+ * The "+" after `row`: the icon whose markup says add / plus; failing that the
+ * blue one; failing that the only icon beside one whose markup says delete.
+ * Never one whose markup says delete or that is drawn red.
+ */
+function addIconFor(row: TextBox[], s: CilSection): HTMLElement | null {
+  const icons = iconsAfter(row, s);
+  const safe = icons.filter((el) => !DELETE_ICON.test(iconWords(el)) && iconHue(el) !== 'red');
+  return safe.find((el) => ADD_ICON.test(iconWords(el)))
+    ?? safe.find((el) => iconHue(el) === 'blue')
+    ?? (safe.length === 1 && icons.some((el) => DELETE_ICON.test(iconWords(el))) ? safe[0] : null);
+}
+
+/**
+ * Clicks as the page's own code would. A link like <a href="javascript:addRow()">
+ * does nothing when a content script clicks it (Chrome refuses the javascript:
+ * address there), so the element is marked and the extension's service worker
+ * makes the click in the page's world. Anything else may fall back to a plain
+ * click; such a link never does — it would only be refused again.
+ */
+async function pageClick(el: HTMLElement): Promise<void> {
+  const token = Math.random().toString(36).slice(2);
+  const scripted = /^\s*javascript:/i.test(el.closest('a')?.getAttribute('href') ?? '');
+  el.setAttribute('data-fillpilot-click', token);
+  el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  let answer: unknown;
+  try {
+    answer = await chrome.runtime.sendMessage({ type: 'fillpilot.pageClick', token });
+  } catch (err) {
+    answer = `the extension's background did not answer (${err instanceof Error ? err.message : String(err)})`;
+  } finally {
+    el.removeAttribute('data-fillpilot-click');
+  }
+  if (answer === 'clicked') return;
+  if (!scripted) {
+    el.click();
+    return;
+  }
+  throw new StepStopped(`the "+" is a link that runs the site's own script, and the click could not be made in the page (${String(answer)}) — `
+    + 'reload FillPilot in chrome://extensions, reload this page, then press Fill again');
+}
+
+/** A key event as a keyboard sends it — older pages read keyCode / which / charCode, not key. */
+function keyEvent(box: Element, type: 'keydown' | 'keypress' | 'keyup', ch: string): void {
+  const upper = ch.toUpperCase().charCodeAt(0);
+  const keyCode = type === 'keypress'
+    ? ch.charCodeAt(0)
+    : /[A-Za-z0-9 ]/.test(ch) ? upper : ({ '-': 189, '.': 190, ',': 188, '/': 191 } as Record<string, number>)[ch] ?? upper;
+  const init: KeyboardEventInit & { keyCode?: number; which?: number; charCode?: number } = {
+    bubbles: true, cancelable: true, key: ch, keyCode, which: keyCode, charCode: type === 'keypress' ? keyCode : 0,
+  };
+  box.dispatchEvent(new KeyboardEvent(type, init));
+}
+
+/**
+ * Focuses a box and types into it key by key, as a person does — pages look a
+ * code up or work an amount out from key handlers. While the side panel has
+ * the keyboard focus, the page's window does not, and the browser then sends
+ * the page no focus or blur at all: those are sent here (and in `leave`).
+ */
+function typeKeys(box: TextBox, value: string): void {
+  box.focus({ preventScroll: true });
+  if (!document.hasFocus()) {
+    box.dispatchEvent(new FocusEvent('focus'));
+    box.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+  }
+  setNativeValue(box, '');
+  let typed = '';
+  for (const ch of value) {
+    keyEvent(box, 'keydown', ch);
+    keyEvent(box, 'keypress', ch);
+    typed += ch;
+    setNativeValue(box, typed);
+    box.dispatchEvent(new InputEvent('input', { bubbles: true, data: ch, inputType: 'insertText' }));
+    keyEvent(box, 'keyup', ch);
+  }
+  if (!value) box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+}
+
+/** Leaves a box: change, then blur — where many pages look a code up or recalculate. */
+function leave(box: TextBox): void {
+  box.dispatchEvent(new Event('change', { bubbles: true }));
+  if (!document.hasFocus()) {
+    box.dispatchEvent(new FocusEvent('blur'));
+    box.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+  }
+  box.blur();
+}
+
+/** Types a whole value and leaves the box. → error message, or null when it took. */
+function enter(box: TextBox, value: string): string | null {
+  typeKeys(box, value);
+  leave(box);
+  const ok = box.value === value || (value.trim() !== '' && box.value.trim() !== '' && Number(box.value) === Number(value));
+  flash(box, ok ? OUTLINE.filled : OUTLINE.failed, 2500);
+  return ok ? null : `the page changed the value to "${box.value}"`;
+}
+
+/**
+ * Types a CIL code and waits for the site to name the item — the proof that it
+ * knows the code. A page may offer the code in a list as it is typed (then the
+ * entry is picked, as a person would) or look it up when the box is left.
+ * → null once named, else what the page did, for the message.
+ */
+async function enterCilCode(codeBox: TextBox, code: string, named: () => string): Promise<string | null> {
+  const appeared: HTMLElement[] = [];
+  const observer = new MutationObserver((records) => {
+    for (const record of records) for (const node of Array.from(record.addedNodes)) if (node instanceof HTMLElement) appeared.push(node);
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  let picked = '';
+  try {
+    typeKeys(codeBox, code);
+    const offer = await waitFor(() => (named() ? 'named' : findTariffResult(code, appeared, codeBox)), 2500);
+    if (offer instanceof HTMLElement) {
+      picked = textOf(offer).slice(0, 60);
+      press(offer);
+      await sleep(PACE.part);
+    }
+  } finally {
+    observer.disconnect();
+  }
+  leave(codeBox);
+  flash(codeBox, OUTLINE.filled, 2500);
+  if (await waitFor(() => named(), 8000)) return null;
+  return `the site did not fill in the item name for ${code}${picked ? ` after "${picked}" was picked from its list` : ''} (${describeAppeared(appeared)}; `
+    + `the page ${document.hasFocus() ? 'had' : 'did not have'} the keyboard focus)`;
+}
+
+/** Long names are cut to what the box takes (maxlength), as typing would. */
+const fit = (box: TextBox, text: string) => (box.maxLength > 0 ? text.slice(0, box.maxLength) : text);
+
+/** The number in a box ("2,689.00" → 2689), or null when it is empty or not a number. */
+function amountIn(box: Control | null | undefined): number | null {
+  const text = (box?.value ?? '').replace(/,/g, '').trim();
+  const n = Number(text);
+  return text && Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Adds one Bill Details row: into the first empty row of its section, or a new
+ * one from the "+" after the last row. CGHS rows: the code (the site fills in
+ * the name), the quantity, the bill's rate only when the site gives none, the
+ * service in Remarks. Unlisted rows: code, name, quantity, rate. A row already
+ * entered for this code and service is not added twice.
+ */
+async function addCilRow(a: Extract<PageAction, { type: 'addCilRow' }>): Promise<{ message: string; warn: boolean; skipped?: boolean }> {
+  const where = CIL_SECTION_NAME[a.section];
+  const service = (a.section === 'cghs' ? a.remarks : a.name) ?? '';
+  const serviceCol = a.section === 'cghs' ? CIL_COL.remarks : CIL_COL.name;
+
+  const read = (s: CilSection | null) => {
+    if (!s) throw new StepStopped(`"Category -: ${where}" was not found — open the Bill Details tab on the site, then press Fill again`);
+    const odd = s.rows.find((r) => r.length !== CIL_BOXES);
+    if (odd) throw new StepStopped(`A "${where}" row has ${odd.length} boxes where ${CIL_BOXES} were expected, so nothing was added (the page layout has been saved for the developer)`);
+    return s;
+  };
+  const s = read(await waitFor(() => cilSection(a.section), 3000));
+
+  const sameText = (box: TextBox, text: string) => {
+    const have = norm(box.value).toLowerCase();
+    const want = norm(text).toLowerCase();
+    return have === want || (have.length >= 8 && want.startsWith(have));
+  };
+  const withCode = s.rows.filter((r) => norm(r[CIL_COL.code].value).toUpperCase() === a.code.toUpperCase());
+  // A CIL code is one row for the whole bill: any row with it means it is entered.
+  if (a.section === 'cghs' && withCode.length) {
+    const qty = withCode.map((r) => r[CIL_COL.qty].value.trim() || '?').join(' + ');
+    return { message: `${a.code} is already in ${where} (quantity ${qty}; the bill: ${a.qty}) — not added again; check that row`, warn: true, skipped: true };
+  }
+  if (service && withCode.some((r) => sameText(r[serviceCol], service))) {
+    return { message: `${a.code} for "${service.slice(0, 50)}" is already in ${where} — not added again`, warn: true, skipped: true };
+  }
+  if (withCode.some((r) => !norm(r[serviceCol].value))) {
+    return { message: `a ${a.code} row without the service is already in ${where} — not added; check that row against the bill`, warn: true, skipped: true };
+  }
+
+  const isEmpty = (r: TextBox[]) => !norm(r[CIL_COL.code].value) && !Number(r[CIL_COL.qty].value);
+  let row = s.rows.find(isEmpty);
+  if (!row) {
+    const last = s.rows[s.rows.length - 1];
+    if (!last) throw new StepStopped(`"${where}" has no row to type into, so nothing was added (the page layout has been saved for the developer)`);
+    const plus = addIconFor(last, s);
+    if (!plus) {
+      const seen = iconsAfter(last, s).map((el) => `<${el.tagName.toLowerCase()}> ${iconWords(el) || '(no markup)'} ${iconHue(el) ?? ''}`.trim());
+      throw new StepStopped(`The blue "+" after the last "${where}" row was not recognised (icons there: ${seen.join(' | ') || 'none'}), so nothing was added — the page layout has been saved for the developer`);
+    }
+    const before = s.rows.length;
+    await pageClick(plus);
+    row = (await waitFor(() => {
+      const now = cilSection(a.section);
+      return now && now.rows.length > before ? now.rows.find(isEmpty) : null;
+    }, 4000)) ?? undefined;
+    if (!row) {
+      const shown = problemsShown();
+      throw new StepStopped(`the blue "+" (<${plus.tagName.toLowerCase()}> ${iconWords(plus) || 'no markup'}) was pressed but no new "${where}" row appeared`
+        + `${shown ? ` — the site says: ${shown}` : ''}; the page layout has been saved for the developer`);
+    }
+    read(cilSection(a.section));
+    await sleep(PACE.part);
+  }
+
+  const box = (col: number) => row![col];
+  if (isLocked(box(CIL_COL.code))) {
+    throw new Error(a.section === 'unlisted'
+      ? 'the Unlisted Procedures row is locked on the site — tick "Prior approval has already taken" there if it applies, then press Fill again'
+      : `the "${where}" row is locked on the site`);
+  }
+
+  let e: string | null;
+  if (a.section === 'cghs') {
+    const notNamed = await enterCilCode(box(CIL_COL.code), a.code, () => norm(box(CIL_COL.name).value));
+    if (notNamed) {
+      enter(box(CIL_COL.code), '');
+      throw new Error(`${notNamed} — the code was cleared again; enter this line yourself`);
+    }
+  } else {
+    e = enter(box(CIL_COL.code), a.code);
+    if (e) throw new Error(`Item Code: ${e}`);
+  }
+
+  const problems: string[] = [];
+  if (a.section === 'unlisted' && a.name) {
+    e = enter(box(CIL_COL.name), fit(box(CIL_COL.name), a.name));
+    if (e) problems.push(`Item Name: ${e}`);
+  }
+  await sleep(PACE.part);
+  e = enter(box(CIL_COL.qty), String(a.qty));
+  if (e) problems.push(`Quantity: ${e}`);
+
+  // CGHS: the site prices its own items — its rate is kept. Typed only when it gives none.
+  const rateBox = box(CIL_COL.rate);
+  const siteRate = a.section === 'cghs' ? await waitFor(() => ((amountIn(rateBox) ?? 0) > 0 ? amountIn(rateBox) : null), 2000) : null;
+  if (siteRate == null) {
+    if (a.rate == null) problems.push('Rate: not readable on the bill — type it yourself');
+    else if (isLocked(rateBox)) problems.push(`Rate: the box is locked on the site (the bill's rate is ${a.rate})`);
+    else {
+      e = enter(rateBox, String(a.rate));
+      if (e) problems.push(`Rate: ${e}`);
+    }
+  }
+  if (a.remarks) {
+    e = enter(box(CIL_COL.remarks), fit(box(CIL_COL.remarks), a.remarks));
+    if (e) problems.push(`Remarks: ${e}`);
+  }
+  if (problems.length) throw new Error(`${a.code} was typed, but ${problems.join('; ')}`);
+
+  const hospital = box(CIL_COL.hospital);
+  const siteAmount = await waitFor(() => ((amountIn(hospital) ?? 0) > 0 ? amountIn(hospital) : null), 2000);
+  if (siteAmount == null) {
+    return { message: `${a.code} × ${a.qty} typed — the site shows no Hospital Amount yet; check the row (the bill: ${a.amount})`, warn: true };
+  }
+  if (Math.abs(siteAmount - a.amount) > 0.5) {
+    return { message: `${a.code} × ${a.qty}: the site's amount is ${siteAmount}${siteRate ? ` at its rate ${siteRate}` : ''}, the bill's is ${a.amount} — check it`, warn: true };
+  }
+  return { message: `${a.code} × ${a.qty} = ${siteAmount}`, warn: false };
+}
+
+/** Boxes on the same line as `label`, after it. */
+function boxesBeside(label: HTMLElement): Control[] {
+  const r = label.getBoundingClientRect();
+  return Array.from(document.querySelectorAll<Control>(CONTROL_SELECTOR))
+    .filter((c) => {
+      if (!isVisible(c) || !isAfter(label, c)) return false;
+      const b = c.getBoundingClientRect();
+      const mid = b.top + b.height / 2;
+      return mid >= r.top - 6 && mid <= r.bottom + 6;
+    })
+    .slice(0, 4);
+}
+
+/**
+ * The site's Pharmacy Amount and Grand Total (Hospital Amount column) against
+ * the bill. The Grand Total may fall short by exactly what is left for the
+ * person (room rent, doctor fees) — that is said, not flagged.
+ */
+async function checkCilTotals(netAmount: number | null, pharmacy: number | null, notFilled: number): Promise<{ message: string; warn: boolean }> {
+  await sleep(PACE.part);
+  const problems: string[] = [];
+  const fine: string[] = [];
+
+  if (pharmacy != null) {
+    const label = formLabel('^\\s*Pharmacy\\s*Amount\\s*:?\\s*$');
+    const site = label ? amountIn(boxesBeside(label)[0]) : null;
+    if (site == null) problems.push(`Pharmacy Amount not found on the page (the bill's pharmacy: ${pharmacy})`);
+    else if (Math.abs(site - pharmacy) > 1) problems.push(`Pharmacy Amount on the site is ${site}, the bill's pharmacy is ${pharmacy} — check the Pharmacy/Consumable tab`);
+    else fine.push(`Pharmacy ${site} matches the bill`);
+  }
+
+  const label = formLabel('^\\s*Grand\\s*Total\\s*:?\\s*$');
+  const boxes = label ? boxesBeside(label) : [];
+  // The Hospital Amount column: the box under that heading, else the one before the last (Entitled Amount).
+  const header = textLeaves(rx('^\\s*Hospital\\s*Amount\\s*$'), 40)[0];
+  const centre = (el: Element) => {
+    const r = el.getBoundingClientRect();
+    return r.left + r.width / 2;
+  };
+  const totalBox = header && boxes.length
+    ? boxes.reduce((best, b) => (Math.abs(centre(b) - centre(header)) < Math.abs(centre(best) - centre(header)) ? b : best))
+    : boxes[boxes.length - 2] ?? boxes[0];
+  const site = amountIn(totalBox);
+  if (site == null) problems.push('Grand Total not found on the page');
+  else if (netAmount != null) {
+    const gap = Math.round((netAmount - site) * 100) / 100;
+    if (Math.abs(gap) <= 1) fine.push(`Grand Total ${site} = the bill's net amount ${netAmount}`);
+    else if (notFilled > 0 && Math.abs(gap - notFilled) <= 1) fine.push(`Grand Total ${site} — with the ${notFilled} left for you (room rent, doctor fees…) it comes to the bill's ${netAmount}`);
+    else problems.push(`Grand Total on the site is ${site}, the bill's net amount is ${netAmount} — ${gap} apart${notFilled ? ` (${notFilled} of the bill is left for you to enter)` : ''}; check the rows`);
+  }
+  return { message: [...problems, ...fine].join('. '), warn: problems.length > 0 };
+}
+
 export async function runActions(actions: PageAction[]): Promise<ActionResult[]> {
   const results: ActionResult[] = [];
   for (const [index, a] of actions.entries()) {
@@ -882,16 +1400,18 @@ export async function runActions(actions: PageAction[]): Promise<ActionResult[]>
       switch (a.type) {
         case 'clickTab': message = await clickTab(a.text, a.next); break;
         case 'clickButton': message = await clickButton(a.text); break;
-        case 'setField': message = await setField(a.field, a.value, a.id); break;
+        case 'setField': message = await setField(a.field, a.value, a.id, a.calendar); break;
         case 'ensureRows': message = await ensureRows(a.headers, a.count, a.addButton); break;
         case 'setCell': message = await setCell(a.headers, a.row, a.column, a.value, a.optionMatch); break;
-        case 'addTariffItem': ({ message, warn } = await addTariffItem(a.code, a.tariff, a.qty, a.amountClaimed, a.tariffOption)); break;
+        case 'addTariffItem': ({ message, warn } = await addTariffItem(a.code, a.tariff, a.qty, a.amountClaimed, a.tariffOption, a.alternatives)); break;
         case 'addProcedure': ({ message, warn, skipped } = await addProcedure(a.code, a.units)); break;
+        case 'addCilRow': ({ message, warn, skipped } = await addCilRow(a)); break;
+        case 'checkCilTotals': ({ message, warn } = await checkCilTotals(a.netAmount, a.pharmacy, a.notFilled)); break;
         default: throw new Error('Unknown action');
       }
       results.push({ index, label: a.label, ok: true, message, ...(warn ? { warn } : {}), ...(skipped ? { skipped } : {}) });
     } catch (err) {
-      results.push({ index, label: a.label, ok: false, message: err instanceof Error ? err.message : String(err) });
+      results.push({ index, label: a.label, ok: false, message: err instanceof Error ? err.message : String(err), ...(err instanceof StepStopped ? { stopped: true } : {}) });
       // Fewer results than actions tells the panel the step stopped. A tab that
       // would not open or a row that could not be added does not stop it: the
       // person may have the tab open already, and the rows that exist still fill.
@@ -904,12 +1424,13 @@ export async function runActions(actions: PageAction[]): Promise<ActionResult[]>
 
 // ------------------------------------------------------- read-only helpers
 
-/** IP number / patient name as printed anywhere on the page (hidden tabs included). */
+/** IP number / admission number / patient name as printed anywhere on the page (hidden tabs included). */
 export function readIdentity(): PageIdentity {
   const text = (document.body.textContent || '').replace(/\s+/g, ' ');
   const ip = /IP\s*(?:Number|No\.?)\s*[:\-]?\s*(\d{4,})/i.exec(text);
-  const name = /Patient\s*Name\s*[:\-]?\s*([A-Z][A-Z .]{2,60}?)(?=\s*(?:Employee|IP|Date|$))/.exec(text);
-  return { ipNumber: ip ? ip[1] : null, patientName: name ? norm(name[1]) : null };
+  const admission = /Admission\s*No\.?\s*[:\-]?\s*(\d{4,})/i.exec(text);
+  const name = /Patient\s*Name\s*[:\-]?\s*([A-Z][A-Z .]{2,60}?)(?=\s*(?:Employee|IP|Date|Patient|Admission|Claim|$))/.exec(text);
+  return { ipNumber: ip ? ip[1] : null, admissionNumber: admission ? admission[1] : null, patientName: name ? norm(name[1]) : null };
 }
 
 /** "div.step.active[role=tab] < ul.steps < …" — the element and up to five ancestors. */
@@ -940,8 +1461,10 @@ export function describePage(probes: string[] = []): PageOutline {
     const l = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : c.closest('label');
     return norm(l?.textContent).slice(0, 80);
   };
-  const attrsOf = (c: Element) => ['role', 'list', 'autocomplete', 'aria-autocomplete', 'aria-controls', 'aria-haspopup', 'data-bs-toggle']
-    .map((a) => (c.hasAttribute(a) ? `${a}=${c.getAttribute(a)}` : ''))
+  // The page's own handlers (onblur="getItem(this)") show what a box reacts to — a lookup on blur, a sum on keyup.
+  const attrsOf = (c: Element) => ['role', 'list', 'autocomplete', 'aria-autocomplete', 'aria-controls', 'aria-haspopup', 'data-bs-toggle',
+    'onblur', 'onchange', 'onkeyup', 'onkeypress', 'onkeydown', 'onfocus', 'oninput']
+    .map((a) => (c.hasAttribute(a) ? `${a}=${(c.getAttribute(a) || '').slice(0, 80)}` : ''))
     .filter(Boolean)
     .join(' ');
   return {
@@ -981,6 +1504,10 @@ export function describePage(probes: string[] = []): PageOutline {
       textLeaves(rx(probe), 80).slice(0, 4).map((el) => ({ probe, text: textOf(el).slice(0, 80), path: domPath(el), pointer: hasPointer(el) })),
     ),
     clickables: pointerRoots.slice(0, 60),
+    icons: visible<HTMLElement>('img, input[type="image"], i, span[class*="icon" i], a[onclick], a[href^="javascript"]')
+      .filter((el) => !textOf(el))
+      .slice(0, 60)
+      .map((el) => ({ tag: el.tagName.toLowerCase(), attrs: iconWords(el), path: domPath(el).split(' < ').slice(0, 4).join(' < ') })),
     frames: document.querySelectorAll('iframe, frame').length,
     shadowHosts: Array.from(document.querySelectorAll('*')).filter((el) => el.shadowRoot).length,
   };

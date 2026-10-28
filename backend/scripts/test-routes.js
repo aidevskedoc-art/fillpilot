@@ -157,7 +157,8 @@ async function main() {
     const refused = await call('POST', '/api/claims/tgnpdcl', adminToken, notBill);
     check('a PDF that is not a hospital bill is refused, and named', [refused.status, refused.body.documents.length], [422, 1]);
     const bills = ['yashoda-final-bill.pdf', 'yashoda-summary-bill.pdf'].map((f) => path.join(__dirname, '..', 'test-fixtures', f));
-    if (bills.every((f) => fs.existsSync(f))) {
+    const tgnpdclRead = bills.every((f) => fs.existsSync(f)) ? 1 : 0;
+    if (tgnpdclRead) {
       const form4 = new FormData();
       for (const f of bills) form4.append('files', new Blob([fs.readFileSync(f)], { type: 'application/pdf' }), path.basename(f));
       const claim = await call('POST', '/api/claims/tgnpdcl', adminToken, form4);
@@ -170,6 +171,28 @@ async function main() {
       fields: [{ label: 'ICU Days', fieldKey: 'room', confidence: null, source: 'profile', outcome: 'filled' }],
     });
     check('a fill is logged without a stored document', [unlinked.status, unlinked.body.documentIds], [201, []]);
+
+    // Team report: per person, counts for a period — Admin only; a user who did nothing is listed with zeros.
+    await db.query(
+      `INSERT INTO audit_logs (actor_user_id, entity_type, action, details)
+       SELECT u.id, 'claim', 'BILLS_READ', d::jsonb FROM users u, unnest($2::text[]) AS d WHERE u.username = $1`,
+      [`admin_${suffix}`, ['{"site":"cil","files":2,"pages":9}', '{"site":"pmjay","files":1,"pages":4}']],
+    );
+    const lastHour = `from=${encodeURIComponent(new Date(Date.now() - 3600e3).toISOString())}&to=${encodeURIComponent(new Date(Date.now() + 60e3).toISOString())}`;
+    check('only an Admin gets the team report', (await call('GET', `/api/reports/team?${lastHour}`, userToken)).status, 403);
+    check('team report refuses a bad period', (await call('GET', '/api/reports/team?from=2026-10-10&to=2026-10-01', adminToken)).status, 400);
+    const report = await call('GET', `/api/reports/team?${lastHour}`, adminToken);
+    const row = (name) => report.body.rows.find((r) => r.username === `${name}_${suffix}`);
+    check('team report counts per person', [report.status, row('admin').bills, row('admin').pdfs >= 3, row('admin').pages >= 13, row('admin').fills, row('admin').stepsDone, row('admin').stepsFailed],
+      [200, { tgnpdcl: tgnpdclRead, pmjay: 1, cil: 1, total: 2 + tgnpdclRead }, true, true, 3, 2, 1]);
+    check('team report lists a user who did nothing, with zeros', [row('other').bills.total, row('other').fills, row('other').pdfs], [0, 0, 0]);
+
+    // Dashboard: the caller's own bills (per site) and fills — not anyone else's.
+    const mine = (await call('GET', '/api/dashboard/stats', adminToken)).body;
+    check('dashboard counts my bills and fills', [mine.last30Days.bills, mine.today.bills, mine.last30Days.fills, mine.last30Days.stepsDone, mine.recentBills.map((b) => b.site).sort()],
+      [{ tgnpdcl: tgnpdclRead, pmjay: 1, cil: 1, total: 2 + tgnpdclRead }, 2 + tgnpdclRead, 3, 2, ['cil', 'pmjay', ...(tgnpdclRead ? ['tgnpdcl'] : [])]]);
+    const theirs = (await call('GET', '/api/dashboard/stats', userToken)).body;
+    check('dashboard shows another user only their own (none)', [theirs.last30Days.bills.total, theirs.last30Days.fills, theirs.recentBills], [0, 0, []]);
 
     // KEEP_PDF=false: the file goes as soon as its data is read; the data stays.
     process.env.KEEP_PDF = 'false';

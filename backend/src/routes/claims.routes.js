@@ -8,6 +8,7 @@ const multer = require('multer');
 const { extractDocument, ExtractionError, PdfReadError } = require('../extraction/extract');
 const { buildTgnpdclClaim } = require('../claims/tgnpdcl');
 const { buildPmjayClaim } = require('../claims/pmjay');
+const { buildCilClaim } = require('../claims/cil');
 
 const router = express.Router();
 
@@ -113,6 +114,15 @@ router.post('/pmjay', upload.array('files', MAX_FILES), route(async (req, res) =
   if (!bills) return;
   const claim = buildPmjayClaim({ final: bills.final, summary: bills.summary });
   await logRead(req, bills.read, 'pmjay');
+  res.json({ documents: bills.documents, ...claim });
+}));
+
+// POST /api/claims/cil — the same bills → the Coal India (e-Arogya Suvidha) IP claim's Bill Details rows.
+router.post('/cil', upload.array('files', MAX_FILES), route(async (req, res) => {
+  const bills = await readBills(req, res, 'Bill Details is');
+  if (!bills) return;
+  const claim = buildCilClaim({ final: bills.final, summary: bills.summary });
+  await logRead(req, bills.read, 'cil');
   res.json({ documents: bills.documents, ...claim });
 }));
 

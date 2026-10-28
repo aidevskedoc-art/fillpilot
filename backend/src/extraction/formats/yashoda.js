@@ -15,16 +15,41 @@ const { isoIfValid } = require('../normalize');
 
 // ---------------------------------------------------------------- helpers
 
-/** OCR look-alikes inside a number: I l i | ! → 1, O o → 0. */
+/** OCR look-alikes in a place that holds only digits: I l L i | ! → 1, O o → 0. */
+function toDigits(text) {
+  return String(text).replace(/[IlLi|!]/g, '1').replace(/[Oo]/g, '0');
+}
+
+/** Amounts are digits only, so every look-alike inside one is a digit. */
 function parseAmount(text) {
   if (!text) return null;
-  const s = String(text)
-    .replace(/[Il|i!]/g, '1')
-    .replace(/[Oo]/g, '0')
+  const s = toDigits(text)
     .replace(/[\s'`]/g, '')
     .replace(/[^\d.,]/g, '');
   const m = /^(\d{1,3}(?:,\d{2,3})*|\d+)\.(\d{2})$/.exec(s);
   return m ? Number(`${m[1].replace(/,/g, '')}.${m[2]}`) : null;
+}
+
+/**
+ * A number printed as digits only (IP no, YH no, age): "I31885" → 131885.
+ * Left as read when it does not become a number — a mismatch then shows.
+ */
+function repairNumber(text) {
+  if (text == null) return text;
+  const read = String(text).trim();
+  const fixed = toDigits(read);
+  return /^\d+$/.test(fixed) ? fixed : read;
+}
+
+/**
+ * A person's name has no digits: a 1 (or | !) or a 0 next to a letter is the
+ * letter I or O — "NET1" → NETI, "R0Y" → ROY. A digit standing alone is left.
+ */
+function repairName(text) {
+  if (!text) return text;
+  return text
+    .replace(/(?<=[A-Za-z])[1|!]|[1|!](?=[A-Za-z])/g, 'I')
+    .replace(/(?<=[A-Za-z])0|0(?=[A-Za-z])/g, 'O');
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -32,48 +57,124 @@ const sameAmount = (a, b) => a != null && b != null && Math.abs(a - b) < 0.011;
 const sum = (list) => round2(list.reduce((s, n) => s + (n || 0), 0));
 
 /**
- * Tariff code as printed ("41A/NIMS", "2121/COMM.", "NIMS/11E", "R171+171/NIMS",
- * "S5.1.17"), repaired from OCR ("IIA/NIMS", "RI 71/NIMS", "75 IA/NIMS", "303/cou.").
- * → { code, tariff: 'NIMS' | 'COMM' | null, raw, valid }
+ * Yashoda's own item codes — not a payer's tariff or package code. They are
+ * printed as they are (no digits), so they would otherwise look misread.
+ * A payer site takes them as the hospital's own items (CIL: Unlisted Procedures).
  */
-function normalizeCode(raw) {
+const OWN_CODES = new Set(['YSSH']);
+
+/**
+ * Item code as printed — a tariff code ("41A/NIMS", "78I/NIMS", "2121/COMM.",
+ * "NIMS/11E", "R171+171/NIMS", "S5.1.17") or a package code ("CI011", "LB037") —
+ * repaired from OCR ("IIA/NIMS", "RI 71/NIMS", "75 IA/NIMS", "303/cou.", "CIOII").
+ *
+ * OCR confuses I with 1 and O with 0 both ways, so each character is read by
+ * its place in the code's shape, never by a blanket swap:
+ *   tariff code (NIMS / COMM)   [up to 2 letters][digits][maybe 1 letter]
+ *   package code (PM-JAY, CIL)  2 letters + 3 digits
+ * A code without a NIMS / COMM mark is read by `family` — the kind of codes the
+ * rest of its bill carries (see codeFamily): 'package' (the default) or 'nims'.
+ * On a NIMS bill an unmarked code printed with two letters first is still a
+ * package code — the CGHS codes some lines carry (MG038, CI001, LB012); read as
+ * a tariff code, CI001 would become C1001. Printed with a digit there (N1003),
+ * it stays a tariff code.
+ *
+ * → { code, tariff: 'NIMS' | 'COMM' | null, raw, valid, own?, alternatives? }
+ *   alternatives: other readings where the shape cannot settle I against 1
+ *   (78I / 781) — the site's tariff list does.
+ */
+function normalizeCode(raw, family = 'package') {
   if (!raw || !raw.trim()) return null;
+  const own = raw.replace(/\s+/g, '').toUpperCase();
+  if (OWN_CODES.has(own)) return { code: own, tariff: null, raw: raw.trim(), valid: true, own: true };
+  // The bills print codes in capitals; a | or ! is OCR's 1 or I (read by place in the fixers below).
   const parts = raw.replace(/\s+/g, '').toUpperCase().split('/').filter(Boolean);
   let tariff = null;
   const codeParts = [];
   parts.forEach((part, i) => {
-    if (/^N[I1L!|]M[S5]\.?$/.test(part)) tariff = 'NIMS';
+    if (/^N[I1L|!]M[S5]\.?$/.test(part)) tariff = 'NIMS';
     // "COMM." after the slash, as OCR mangles it: COPN. CORM. COU. CONUN. C02Q.F CO»N.F
     else if (i > 0 && /^C[O0][^/]{0,5}$/.test(part) && !/^C[O0]\d+$/.test(part)) tariff = 'COMM';
     else codeParts.push(part);
   });
-  // A NIMS / COMM code has its 1s read as I or L ("RI 71/NIMS" → R171). An
-  // unmarked code is a PM-JAY package code (two letters, three digits), where
-  // OCR swaps both ways ("CIOII" → CI011, "R1034" → RI034).
-  const code = codeParts.map((p) => (tariff ? fixCodePart(p) : fixPackageCode(p))).join('/');
+  const asPackage = (p) => !tariff && (family !== 'nims' || /^[A-Z]{2}[\dILO|!]{3}$/.test(p));
+  const read = codeParts.map((p) => (asPackage(p) ? { code: fixPackageCode(p), alternatives: [] } : fixTariffCode(p)));
+  const code = read.map((r) => r.code).join('/');
+  const alternatives = read.length === 1 ? read[0].alternatives : [];
   const single = '[A-Z]{0,3}\\d+[A-Z]?';
   const valid = new RegExp(`^${single}(\\+${single})*$`).test(code) || /^[A-Z]\d+(\.\d+)+$/.test(code);
-  return { code, tariff, raw: raw.trim(), valid: Boolean(code) && valid };
+  return { code, tariff, raw: raw.trim(), valid: Boolean(code) && valid, ...(alternatives.length ? { alternatives } : {}) };
 }
 
-/** "IIA" → "11A", "RI71" → "R171", "75IA" → "751A": I/L read in place of 1 inside the number. */
-function fixCodePart(part) {
-  // The prefix letter is never I or L — those are the 1s being repaired.
-  return part.replace(/^([A-HJ-KM-Z]?)([\dIL]+)([A-Z]?)((?:\+\d+)?)$/, (m, prefix, digits, suffix, plus) => {
-    if (!/\d/.test(digits) && digits.length < 2) return m;
-    return prefix + digits.replace(/[IL]/g, '1') + suffix + plus;
-  });
+/** A tariff code, several joined by "+" ("R171+171", "N1003+14A") → { code, alternatives }. */
+function fixTariffCode(part) {
+  const pieces = part.split('+').map(fixTariffPiece);
+  return { code: pieces.map((p) => p.code).join('+'), alternatives: pieces.length === 1 ? pieces[0].alternatives : [] };
 }
 
 /**
- * A PM-JAY package code as OCR reads it → two letters + three digits:
- * "CIOII" → "CI011", "LBIOO" → "LB100", "C1001" → "CI001". Anything that does
- * not become that shape is left as read (and flagged if it is not a code).
+ * One tariff code: up to two letters, digits, maybe one letter ("R171", "RH41",
+ * "N1003", "41A", "78I"), or a surgery code ("S5.1.17").
+ * - In the digits, I and L are OCR's 1 and O its 0: "IIA" → 11A, "RI71" → R171,
+ *   "75IA" → 751A, "4OA" → 40A, "1O96" → 1096. The first letters are never I or
+ *   L — those are 1s.
+ * - The last place after the digits holds either a digit or the code's own letter
+ *   (78I). When OCR read a look-alike there (I, L, | or !), the code follows it —
+ *   an I after digits stays I, the others are 1 — and the other reading is
+ *   returned as an alternative.
+ * - A clean 1 there is kept as 1, but OCR also reads the letter I as a clean 1
+ *   (TSH 78I came out as 781 on a client's bill, 2026-10-22). Where a NIMS letter
+ *   can stand — 2 or 3 digits, no prefix (41A, 751A, 78I) — the I is returned as
+ *   the other reading; the site's list and price decide.
  */
-function fixPackageCode(part) {
-  if (part.length !== 5) return part;
-  const fixed = part.slice(0, 2).replace(/1/g, 'I').replace(/0/g, 'O') + part.slice(2).replace(/O/g, '0').replace(/[IL]/g, '1');
-  return /^[A-Z]{2}\d{3}$/.test(fixed) ? fixed : part;
+function fixTariffPiece(piece) {
+  const surgery = /^([A-Z])([\dILO|!]+(?:\.[\dILO|!]+)+)$/.exec(piece);
+  if (surgery) return { code: surgery[1] + toDigits(surgery[2]), alternatives: [] };
+  const m = /^([A-HJ-KM-Z]{0,2})([\dILO|!]+)([A-Z]?)$/.exec(piece);
+  // Too little to tell digits from letters ("IA"): left as read (and flagged as not a code).
+  if (!m || (!/\d/.test(m[2]) && m[2].length < 2)) return { code: piece, alternatives: [] };
+  const [, prefix, run, letter] = m;
+  const digits = toDigits(run);
+  if (letter || digits.length < 2) return { code: prefix + digits + letter, alternatives: [] };
+  const asOne = prefix + digits;
+  const asI = `${prefix}${digits.slice(0, -1)}I`;
+  if (!/[IL|!]$/.test(run)) {
+    const couldBeI = !prefix && run.endsWith('1') && /^\d{3,4}$/.test(digits);
+    return { code: asOne, alternatives: couldBeI ? [asI] : [] };
+  }
+  return run.endsWith('I') && /\d/.test(run.slice(0, -1))
+    ? { code: asI, alternatives: [asOne] }
+    : { code: asOne, alternatives: [asI] };
+}
+
+/**
+ * A package code (PM-JAY, Coal India) as OCR reads it → two letters + three
+ * digits: "CIOII" → "CI011", "LBIOO" → "LB100", "C1001" → "CI001". Anything that
+ * does not become that shape is left as read (and flagged if it is not a code).
+ */
+function fixPackageCode(read) {
+  const part = read.replace(/[|!]/g, '1');
+  if (part.length !== 5) return read;
+  const fixed = part.slice(0, 2).replace(/1/g, 'I').replace(/0/g, 'O') + toDigits(part.slice(2));
+  return /^[A-Z]{2}\d{3}$/.test(fixed) ? fixed : read;
+}
+
+/**
+ * Which kind of codes a final bill carries: NIMS / COMM-marked tariff codes (a
+ * TGNPDCL patient) or unmarked package codes (PM-JAY, Coal India). A code printed
+ * without a mark is read the same way as the rest: "N1003" stays N1003 on a NIMS
+ * bill, while "C1001" is CI001 on a package bill.
+ */
+function codeFamily(rawCodes) {
+  let marked = 0;
+  let packaged = 0;
+  for (const raw of rawCodes) {
+    const c = normalizeCode(raw);
+    if (!c || c.own) continue;
+    if (c.tariff) marked += 1;
+    else if (/^[A-Z]{2}\d{3}$/.test(c.code)) packaged += 1;
+  }
+  return marked > packaged ? 'nims' : 'package';
 }
 
 /** "2 Visit(s) x 350.00", "1 Time ( s ) x 75.00", "2 X 450.00" → { qty, unit, rate } */
@@ -99,8 +200,14 @@ function detectFormat(allLines) {
 
 // ------------------------------------------------------------ final bill
 
-/** Column boundaries as a share of page width (the bill layout is fixed). */
-const FINAL_COLUMNS = { value: 0.4, code: 0.66, amount: 0.82 };
+/**
+ * Column boundaries as a share of page width. Codes start at 0.656 on some
+ * bills (a 3-page TGNPDCL bill, 2026-09) and at 0.66–0.76 on others, so the
+ * code column begins at 0.62: quantities are left-aligned at about 0.39, and the
+ * right-aligned "Sub Total..." / "Grand Total..." / "Net Amount :" end before
+ * the codes.
+ */
+const FINAL_COLUMNS = { value: 0.4, code: 0.62, amount: 0.82 };
 /** Numbered section headings sit at the left margin. */
 const SECTION_MAX_X = 25;
 /**
@@ -177,10 +284,11 @@ function parseFinalBill(pages) {
     itemIndent = itemIndentOf(lines, width) ?? itemIndent;
     for (const line of lines) {
       const text = line.text.replace(/\s*\|\s*/g, ' ').trim();
-      const nameMatch = new RegExp(`^${NAME_LABEL}\\s*(.+?)\\s+IP\\s*No\\s*[:.;]?\\s*(\\d+)`, 'i').exec(text);
+      // "IP No" as OCR reads it too ("1P N0"); the IP number is digits only ("I31885" → 131885).
+      const nameMatch = new RegExp(`^${NAME_LABEL}\\s*(.+?)\\s+[I1l|]P\\s*N[o0]\\s*[:.;]?\\s*([\\dIlLO|!]+)`, 'i').exec(text);
       if (nameMatch) {
-        patient.name ||= nameMatch[1].trim();
-        patient.ipNo ||= nameMatch[2];
+        patient.name ||= repairName(nameMatch[1].trim());
+        patient.ipNo ||= repairNumber(nameMatch[2]);
         continue;
       }
       if (isHeaderLine(text) || isPunctuationOnly(text) || STAMP_TEXT.test(text)) continue;
@@ -189,7 +297,7 @@ function parseFinalBill(pages) {
       if (!c.amount && c.descX != null && c.descX > itemIndent + STAMP_INDENT_GAP) continue; // stamp / signature
       const pos = page * 100000 + (100000 - line.y * 100); // reading order across pages
 
-      if (/sub\s*total/i.test(c.value) || /sub\s*total/i.test(c.desc)) {
+      if ([c.value, c.desc, c.code].some((t) => /sub\s*total/i.test(t))) {
         if (!group) newGroup(null);
         group.subTotal = parseAmount(c.amount);
         group.subTotalRaw = c.amount || null;
@@ -229,10 +337,15 @@ function parseFinalBill(pages) {
     }
   }
 
+  // Codes printed without a NIMS / COMM mark are read like the rest of this bill's codes.
+  const family = codeFamily(sections.flatMap((s) => s.groups.flatMap((g) => g.rows.filter((r) => r.kind === 'anchor' && r.code).map((r) => r.code))));
+
   // Rows → items: description lines join the nearest amount line of their group
   // (multi-line descriptions are printed centred on the amount).
   let computedTotal = 0;
   for (const s of sections) {
+    // Doctor lines are names, which hold no digits.
+    const names = /DOCTOR|CONSULTATION/i.test(s.name);
     for (const g of s.groups) {
       const anchors = g.rows.filter((r) => r.kind === 'anchor').map((r) => ({ ...r, parts: r.desc ? [{ pos: r.pos, text: r.desc }] : [] }));
       for (const t of g.rows.filter((r) => r.kind === 'text')) {
@@ -261,9 +374,10 @@ function parseFinalBill(pages) {
             qtyNote = `Quantity "${a.value}" could not be read — 1 assumed`;
           }
         }
-        const code = normalizeCode(a.code);
+        const code = normalizeCode(a.code, family);
+        const description = a.parts.sort((x, y) => x.pos - y.pos).map((p) => p.text).join(' ').replace(/\s+/g, ' ').trim();
         const item = {
-          description: a.parts.sort((x, y) => x.pos - y.pos).map((p) => p.text).join(' ').replace(/\s+/g, ' ').trim(),
+          description: names ? repairName(description) : description,
           qty: q.qty ?? 1,
           unit: q.unit ?? null,
           rate: q.rate ?? null,
@@ -274,6 +388,8 @@ function parseFinalBill(pages) {
           amountRaw: a.amount || null,
           page: a.page,
           issues: [],
+          ...(code?.own ? { ownCode: true } : {}),
+          ...(code?.alternatives ? { codeAlternatives: code.alternatives } : {}),
         };
         if (qtyNote) item.issues.push(qtyNote);
         if (code && !code.valid) item.issues.push(`Code "${code.raw}" may be misread`);
@@ -386,8 +502,22 @@ function reconcileGroup(section, g, issues) {
 
 // ---------------------------------------------------------- summary bill
 
+/**
+ * Invoice numbers are "ICO" + 7 digits. OCR reads the letters as digits
+ * ("IC06076856", "1CO6076856") and the digits as letters ("ICO6O7I879"); each
+ * place is put back to what it holds. Anything else is left as read.
+ */
+function repairInvoiceNo(text) {
+  const read = String(text).toUpperCase();
+  const m = /^[I1L|!]C[O0](.{7})$/.exec(read);
+  if (!m) return read;
+  const digits = toDigits(m[1]);
+  return /^\d{7}$/.test(digits) ? `ICO${digits}` : read;
+}
+
+/** "10-10-2026 01:36" — digits only, so look-alikes are digits ("1O-1O-2026"). */
 function parseDateTime(text) {
-  const m = /(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:\s+(\d{1,2}:\d{2}))?/.exec(text || '');
+  const m = /(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:\s+(\d{1,2}:\d{2}))?/.exec(toDigits(text || ''));
   if (!m) return null;
   return { date: isoIfValid(m[3], m[2], m[1]), time: m[4] || null };
 }
@@ -425,6 +555,8 @@ function parseSummaryBill(pagesIn) {
   let invoiceNo = null;
   let inCharges = false;
   let totalAmountLines = 0;
+  /** A bill the company pays in full prints no "PAID AMOUNT" line at all (Coal India). */
+  let paidPrinted = false;
   let prevFirst = '';
 
   for (const { width, lines } of pages) {
@@ -435,7 +567,7 @@ function parseSummaryBill(pagesIn) {
       // "COMPANY: NORTHERN POWER DISTRIBUTION COMPANY OF" continues on the next line ("T.G. LTD").
       // The header repeats on every page — append the continuation once.
       const continuation = first?.text.trim();
-      if (/^COMPANY\s*:/i.test(prevFirst) && first && first.x0 < 0.4 * width && !continuation.includes(':')
+      if (/^C[O0]MPANY\s*[:;]/i.test(prevFirst) && first && first.x0 < 0.4 * width && !continuation.includes(':')
         && patient.company && !patient.company.endsWith(continuation)) {
         patient.company += ` ${continuation}`;
       }
@@ -444,19 +576,21 @@ function parseSummaryBill(pagesIn) {
       for (const seg of line.segments) {
         const t = seg.text.trim();
         let m;
-        if ((m = /INVOICE\s*NO\s*[:.]?\s*([A-Z0-9]+)/i.exec(t))) invoiceNo ||= m[1];
-        else if ((m = /^NAME\s*:\s*(.+)$/i.exec(t))) patient.name ||= m[1].trim();
-        else if ((m = /^IP\s*NO\s*:\s*(\S+)/i.exec(t))) patient.ipNo ||= m[1];
-        else if ((m = /^YH\s*NO\s*:\s*(\S+)/i.exec(t))) patient.yhNo ||= m[1];
-        else if ((m = /^AGE\s*\/\s*SEX\s*:\s*(\d+)\s*Y?\s*\/?\s*([MFO])?/i.exec(t))) {
-          patient.age ||= Number(m[1]);
+        // Labels as OCR reads them too: "INV0ICE N0", "1P NO", "D.0.A".
+        if ((m = /[I1l|]NV[O0][I1l|]CE\s*N[O0]\s*[:.]?\s*([A-Z0-9|!]+)/i.exec(t))) invoiceNo ||= repairInvoiceNo(m[1]);
+        else if ((m = /^NAME\s*[:;]\s*(.+)$/i.exec(t))) patient.name ||= repairName(m[1].trim());
+        else if ((m = /^[I1l|]P\s*N[O0]\s*[:;]\s*(\S+)/i.exec(t))) patient.ipNo ||= repairNumber(m[1]);
+        else if ((m = /^YH\s*N[O0]\s*[:;]\s*(\S+)/i.exec(t))) patient.yhNo ||= repairNumber(m[1]);
+        else if ((m = /^AGE\s*\/\s*SEX\s*[:;]\s*([\dIlO|]+)\s*Y?\s*\/?\s*([MFO])?/i.exec(t))) {
+          const age = repairNumber(m[1]);
+          if (/^\d+$/.test(age)) patient.age ||= Number(age);
           if (m[2]) patient.gender ||= { M: 'Male', F: 'Female', O: 'Other' }[m[2].toUpperCase()];
-        } else if ((m = /^CONSULTANT\s*:\s*(?:Dr\.?\s*)?(.+?)\s*(?:\(([^)]+)\))?\s*$/i.exec(t))) {
-          patient.consultant ||= m[1].trim();
+        } else if ((m = /^C[O0]NSULTANT\s*[:;]\s*(?:Dr\.?\s*)?(.+?)\s*(?:\(([^)]+)\))?\s*$/i.exec(t))) {
+          patient.consultant ||= repairName(m[1].trim());
           if (m[2]) patient.consultantSpeciality ||= m[2].trim();
-        } else if ((m = /^COMPANY\s*:\s*(.+)$/i.exec(t))) patient.company ||= m[1].trim();
-        else if ((m = /^D\.?O\.?A\s*:\s*(.+)$/i.exec(t))) patient.admission ||= parseDateTime(m[1]);
-        else if ((m = /^D\.?O\.?D\s*:\s*(.+)$/i.exec(t))) patient.discharge ||= parseDateTime(m[1]);
+        } else if ((m = /^C[O0]MPANY\s*[:;]\s*(.+)$/i.exec(t))) patient.company ||= m[1].trim();
+        else if ((m = /^D\.?[O0]\.?A\s*[:;]\s*(.+)$/i.exec(t))) patient.admission ||= parseDateTime(m[1]);
+        else if ((m = /^D\.?[O0]\.?D\s*[:;]\s*(.+)$/i.exec(t))) patient.discharge ||= parseDateTime(m[1]);
         else if ((m = /^DISCH\s*STATUS\s*:\s*(.+)$/i.exec(t))) patient.dischargeStatus ||= m[1].trim();
       }
 
@@ -481,6 +615,7 @@ function parseSummaryBill(pagesIn) {
         continue;
       }
       if (/PAID\s+AMOUNT/i.test(text)) {
+        paidPrinted = true;
         totals.paid = amount;
         continue;
       }
@@ -511,7 +646,9 @@ function parseSummaryBill(pagesIn) {
   const credit = totals.credit?.amount ?? null;
   if (totals.paid == null && credit != null && totals.total != null) {
     totals.paid = round2(totals.total - credit);
-    issues.push({ level: 'info', message: `Paid amount unreadable — derived as total − credit: ${totals.paid.toFixed(2)}` });
+    // Not printed and nothing left to pay: the company pays the whole bill — nothing to report.
+    if (paidPrinted) issues.push({ level: 'info', message: `Paid amount unreadable — derived as total − credit: ${totals.paid.toFixed(2)}` });
+    else if (totals.paid !== 0) issues.push({ level: 'info', message: `No paid amount on the bill — worked out as total − credit: ${totals.paid.toFixed(2)}` });
   } else if (totals.total == null && credit != null && totals.paid != null) {
     totals.total = round2(credit + totals.paid);
   } else if (credit == null && totals.credit && totals.total != null && totals.paid != null) {
@@ -543,4 +680,7 @@ function parseStructured(format, pages) {
   return null;
 }
 
-module.exports = { detectFormat, parseStructured, parseFinalBill, parseSummaryBill, parseAmount, normalizeCode, parseQuantity };
+module.exports = {
+  detectFormat, parseStructured, parseFinalBill, parseSummaryBill, parseAmount, normalizeCode, codeFamily, parseQuantity,
+  repairInvoiceNo, repairNumber, repairName,
+};

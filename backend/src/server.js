@@ -60,6 +60,7 @@ app.use('/api/allowed-sites', require('./routes/allowed-sites.routes'));
 app.use('/api/fill-sessions', require('./routes/fill-sessions.routes'));
 app.use('/api/audit-logs', require('./routes/audit-logs.routes'));
 app.use('/api/dashboard', require('./routes/dashboard.routes'));
+app.use('/api/reports', require('./routes/reports.routes'));
 app.use('/api/claims', require('./routes/claims.routes'));
 
 // Synthetic target forms for development (never in production).

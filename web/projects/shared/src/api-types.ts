@@ -63,8 +63,14 @@ export interface TgnpdclClaim {
     };
     investigations: {
       /** One row per tariff code (repeated tests merged: qty and amount summed). manual = not searchable on the site. */
-      items: { code: string | null; tariff: string | null; description: string; qty: number; amountClaimed: number; lines: number; review: boolean; manual: boolean; notes: string[] }[];
+      items: {
+        code: string | null; tariff: string | null; description: string; qty: number; amountClaimed: number; lines: number; review: boolean; manual: boolean; notes: string[];
+        /** Other readings of the code's last character, where OCR cannot tell I from 1 (78I / 781) — the site's tariff list decides. */
+        alternatives?: string[];
+      }[];
       implants: { amount: number; note: string } | null;
+      /** The hospital's own codes (YSSH): in no tariff list — entered on the site as non-tariff items. Identical lines are one row. */
+      ownItems?: { code: string; description: string; qty: number; rate: number | null; amountClaimed: number; lines: number; notes: string[] }[];
     };
     pharmacy: { total: number | null; rows: unknown[]; note: string | null };
     summary: { employeePaid: number | null; concession: number; hospitalBillNumber: string | null };
@@ -87,6 +93,45 @@ export interface PmjayClaim {
   /** Bill lines that cannot be picked by code (no code, or a combined one) — for the person. */
   manual: { section: string; description: string; count: number; amount: number; reason: string }[];
   totals: { billTotal: number; coded: number; notCoded: number };
+  checks: ClaimCheck[];
+}
+
+/** One Bill Details row of the Coal India claim (backend/src/claims/cil.js). rate is the bill's (null when unreadable). */
+export interface CilRow {
+  code: string;
+  description: string;
+  /** Typed in Remarks of an Unlisted row (room rent: "ROOM RENT" — the site does not take it empty). */
+  remarks?: string;
+  qty: number;
+  rate: number | null;
+  amount: number;
+  lines: number;
+  section: string;
+  notes: string[];
+}
+
+/**
+ * POST /api/claims/cil (the bill PDFs, multipart) — the Bill Details tab of the
+ * Coal India IP claim on e-Arogya Suvidha. Kept by neither the server nor the
+ * panel beyond the browser session.
+ */
+export interface CilClaim {
+  documents: { fileName: string; docType: string | null; pageCount: number | null; error?: string }[];
+  patient: { name?: string; ipNo?: string; company?: string; consultant?: string };
+  hospitalBillNumber: string | null;
+  /** The discharge date as the site writes it, dd-mm-yyyy. */
+  billDate: string | null;
+  /** CGHS List Items: CIL codes — the site names and prices them; the service goes in Remarks. */
+  cghs: CilRow[];
+  /** Unlisted Procedures: the hospital's own code (YSSH), the codes CIL takes as unlisted (BC002, BC006) and room rent (code "ROOM RENT") — code, name, quantity and rate typed. */
+  unlisted: CilRow[];
+  /** Doctor fees, lines without a code — for the person. */
+  manual: { section: string; description: string; count: number; amount: number; reason: string }[];
+  /** Room rent on the bill: filled under Unlisted Procedures, and entered by the person in Room Details on the Admission tab. */
+  room: { days: number; amount: number } | null;
+  /** Reaches Bill Details from the site's Pharmacy tab — only compared. */
+  pharmacy: number | null;
+  totals: { billTotal: number; netAmount: number | null; cghs: number; unlisted: number; manual: number };
   checks: ClaimCheck[];
 }
 
@@ -120,10 +165,21 @@ export interface ExtractedTable {
   rows: string[][];
 }
 
+/** The sites whose bills FillPilot reads (BILLS_READ in the activity log). */
+export type BillSite = 'tgnpdcl' | 'pmjay' | 'cil';
+
+/** GET /api/dashboard/stats — the caller's own work; one final + summary bill read = 1 bill. */
 export interface DashboardStats {
-  documents: { total: number; processed: number; pending: number; failed: number; avgConfidence: number | null };
-  recent: DocumentDto[];
-  last30Days: { fillSessions: number; fieldsFilled: number; fieldsDetected: number };
+  today: { bills: number; pdfs: number };
+  last30Days: {
+    bills: { tgnpdcl: number; pmjay: number; cil: number; total: number };
+    pdfs: number;
+    pages: number;
+    fills: number;
+    stepsDone: number;
+    stepsFailed: number;
+  };
+  recentBills: { site: BillSite; pdfs: number; pages: number; at: string }[];
 }
 
 export type MatchSource = 'saved' | 'exact' | 'alias' | 'similar' | 'manual';
@@ -236,6 +292,32 @@ export interface AuditLogEntry {
   details: Record<string, unknown> | null;
   ipAddress: string | null;
   createdAt: string;
+}
+
+/** GET /api/reports/team — one row per person, counts only. */
+export interface TeamReportRow {
+  userId: number;
+  username: string;
+  fullName: string;
+  role: 'Admin' | 'User';
+  isActive: boolean;
+  /** Patients' bills read (one final + summary bill = 1), per site. */
+  bills: { tgnpdcl: number; pmjay: number; cil: number; total: number };
+  pdfs: number;
+  pages: number;
+  /** PDFs uploaded for the other (any-PDF) mode. */
+  uploads: number;
+  /** Times Fill was pressed, and the steps it did and could not do. */
+  fills: number;
+  stepsDone: number;
+  stepsFailed: number;
+  lastActive: string | null;
+}
+
+export interface TeamReport {
+  from: string;
+  to: string;
+  rows: TeamReportRow[];
 }
 
 export interface ManagedUser extends User {

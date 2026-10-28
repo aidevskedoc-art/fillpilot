@@ -6,23 +6,41 @@ import { api, messageOf } from './api';
 import { ActiveTab, bridge } from './page-bridge';
 import { ReviewRow, toRow } from './review-model';
 import { GuideOverlay } from './Guide';
-import { BoltIcon, InfoIcon, LogOutIcon, MoonIcon, RefreshIcon, ScanIcon, SettingsIcon, ShieldIcon, SunIcon } from './Icons';
+import { ArrowRightIcon, BoltIcon, InfoIcon, LogOutIcon, MoonIcon, RefreshIcon, ScanIcon, SettingsIcon, ShieldIcon, SunIcon } from './Icons';
 import { Logo } from './Logo';
 import { Settings } from './Settings';
 import { TgnpdclView } from './TgnpdclView';
 import { isTgnpdclBillPage } from './tgnpdcl-plan';
 import { PmjayView } from './PmjayView';
 import { isPmjayPage } from './pmjay-plan';
+import { CilView } from './CilView';
+import { isCilPage } from './cil-plan';
 import { Theme, applyTheme, savedTheme } from './theme';
 import { UploadPdfs } from './UploadPdfs';
 
 type SiteState = 'no-tab' | 'unknown' | 'not-approved' | 'ready';
+
+/** "Coal India e-BPA" → "CO", "PM-JAY Provider" → "PM": the badge on a site's card. */
+const siteInitials = (name: string) => name.replace(/[^A-Za-z]/g, '').slice(0, 2).toUpperCase() || '?';
+/** "https://www.cilbpa.utiitsl.com" → "www.cilbpa.utiitsl.com". */
+const hostOf = (origin: string) => {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return origin;
+  }
+};
+
+/** The bill sites (TGNPDCL, PM-JAY, Coal India): FillPilot works there in bill entry only, never the any-PDF mode. */
+const isBillSite = (url: URL | null) => Boolean(url && /(^|\.)(tgnpdcl\.com|provider\.nha\.gov\.in|cilbpa\.utiitsl\.com)$/i.test(url.hostname));
 type RowFilter = 'all' | 'review' | 'matched' | 'unmatched';
 
 export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [tab, setTabState] = useState<ActiveTab | null>(null);
   const tabRef = useRef<ActiveTab | null>(null);
   const [sites, setSites] = useState<AllowedSite[]>([]);
+  /** The site whose access Chrome is being asked for — its card shows it, the others wait. */
+  const [enabling, setEnabling] = useState<string | null>(null);
   const [docs, setDocs] = useState<DocumentDto[]>([]);
   const [docId, setDocId] = useState('');
   const [match, setMatch] = useState<MatchResponse | null>(null);
@@ -127,10 +145,27 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
     if (tabRef.current) bridge.highlight(tabRef.current.tabId, row.ref);
   };
 
-  const enable = (s: AllowedSite) =>
-    run(async () => {
-      if (await bridge.requestAccess(s.origin)) await refreshTab(true);
+  const enable = (s: AllowedSite) => {
+    setEnabling(s.origin);
+    return run(async () => {
+      try {
+        if (!(await bridge.requestAccess(s.origin))) {
+          setError(`Chrome did not give access to ${s.origin} — choose it again and press "Allow".`);
+          return;
+        }
+        const now = await bridge.activeTab();
+        setTab(now);
+        resetReview();
+        // Access is given to the approved address only: a tab on any other one (http/https, "www.", a port) stays unreadable.
+        if (now && !now.url) {
+          setError(`Access was given to ${s.origin}, but this tab is on a different address, so FillPilot still cannot read it. `
+            + `The address bar must begin exactly with ${s.origin} — if it does not (http or https, "www.", a port number), that address has to be approved on the server.`);
+        }
+      } finally {
+        setEnabling(null);
+      }
     });
+  };
 
   const scan = () => {
     const t = tabRef.current;
@@ -306,17 +341,27 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
         )}
         {siteState === 'unknown' && (
           <>
-            <p className="muted small">Open an approved website. If you are on one already, enable access to it:</p>
+            <p className="muted small">Open the website, then choose it here to let FillPilot work on it.</p>
             {sites.length === 0 && <p className="muted small">No websites are approved yet.</p>}
-            {sites.map((s) => (
-              <div key={s.id} className="site-row">
-                <div className="min-w-0">
-                  <div className="truncate">{s.displayName}</div>
-                  <div className="muted small truncate">{s.origin}</div>
-                </div>
-                <button className="btn btn-secondary btn-sm" onClick={() => enable(s)}>Enable</button>
-              </div>
-            ))}
+            <div className="site-list">
+              {sites.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  className="site-card"
+                  disabled={enabling !== null}
+                  onClick={() => enable(s)}
+                  aria-label={`Enable FillPilot on ${s.displayName}`}
+                >
+                  <span className="site-badge" aria-hidden="true">{siteInitials(s.displayName)}</span>
+                  <span className="site-text">
+                    <span className="site-name truncate">{s.displayName}</span>
+                    <span className="site-host truncate">{hostOf(s.origin)}</span>
+                  </span>
+                  <span className="site-action">{enabling === s.origin ? 'Enabling…' : <>Enable <ArrowRightIcon size={14} /></>}</span>
+                </button>
+              ))}
+            </div>
           </>
         )}
         {siteState === 'no-tab' && <p className="muted small">No active tab.</p>}
@@ -326,12 +371,26 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
         <TgnpdclView tab={tab} onError={setError} />
       ) : siteState === 'ready' && tab && isPmjayPage(tab.url) && api.mode !== 'reader' ? (
         <PmjayView tab={tab} onError={setError} />
+      ) : siteState === 'ready' && tab && isCilPage(tab.url) && api.mode !== 'reader' ? (
+        <CilView tab={tab} onError={setError} />
       ) : api.mode === 'reader' ? (
         <section className="section">
           <div className="card card-pad">
             <div className="strong">Open the bill on the website</div>
             <div className="muted small mt-sm">
               Go to the TGNPDCL medical bill entry page and open the patient's bill. FillPilot switches to bill entry there.
+            </div>
+          </div>
+        </section>
+      ) : siteState !== 'ready' || isBillSite(tab?.url ?? null) ? (
+        // The document list and Scan are for other approved forms: not before a site is enabled, nor on a bill site's other pages.
+        <section className="section">
+          <div className="card card-pad">
+            <div className="strong">{siteState === 'ready' ? 'Open the patient\'s bill on this site' : 'Open the website and enable it'}</div>
+            <div className="muted small mt-sm">
+              {siteState === 'ready'
+                ? 'FillPilot switches to bill entry on the bill page: TGNPDCL medical bill entry, the PM-JAY case, or the Coal India claim.'
+                : 'Go to TGNPDCL, PM-JAY or Coal India and press Enable above for that site. On the bill page FillPilot switches to bill entry.'}
             </div>
           </div>
         </section>

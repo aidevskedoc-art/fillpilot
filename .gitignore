@@ -10,6 +10,9 @@ backend/storage/
 backend/storage-test/
 backend/test-fixtures/
 
+# Team reports exported by scripts/team-report.js (staff names and counts)
+backend/reports/
+
 # Generated extension signing key
 extension/key.pem
 

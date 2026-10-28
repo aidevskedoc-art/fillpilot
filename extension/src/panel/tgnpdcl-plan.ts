@@ -48,11 +48,14 @@ const NEXT = '^\\s*Next(\\s*(step|tab))?\\s*[»›→>▸]*\\s*$';
  * CGHS(2025) tiers; the bills mark codes NIMS or COMM ("COMM." too). Yashoda's
  * NIMS rates are the site's EHS Ax-V list (82A CRP ₹750 on both; NIMS(2015)
  * has ₹500) and COMM is EHS Ax-VI — confirmed with the hospital, 2026-10-13.
+ * CGHS is not printed: the backend marks unmarked CGHS codes (MG038) with it,
+ * and they go to "CGHS(2025)-Tier I" (Hyderabad is a Tier I city), never Tier II or III.
  * A mark that is not listed here is never guessed — its codes are left for the person.
  */
 const TARIFF_OPTION: Record<string, string> = {
   NIMS: '^EHS\\s*Ax\\s*-?\\s*V\\s*$',
   COMM: '^EHS\\s*Ax\\s*-?\\s*VI\\s*$',
+  CGHS: '^CGHS\\s*\\(\\s*2025\\s*\\)\\s*[-‐‑–—]?\\s*Tier\\s*[-‐‑–—]?\\s*(I|1)\\s*$',
 };
 
 /** Captions this profile relies on — located in the page outline saved when a step fails. */
@@ -64,6 +67,8 @@ export const OUTLINE_PROBES = [
 ];
 
 const rupees = (n: number | null | undefined) => (n == null ? '—' : `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`);
+/** " (or 781)" — a code whose last character OCR cannot settle; the site's price for each reading decides. */
+const orReadings = (alternatives?: string[]) => (alternatives?.length ? ` (or ${alternatives.join(' / ')})` : '');
 
 export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
   const { room, investigations, pharmacy, summary } = claim.tabs;
@@ -105,6 +110,8 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
     .filter((i) => !i.manual && i.code)
     .sort((a, b) => Number(!optionFor(a.tariff)) - Number(!optionFor(b.tariff)) || (a.tariff || '').localeCompare(b.tariff || ''));
   const uncoded = investigations.items.filter((i) => i.manual || !i.code);
+  // The hospital's own codes (YSSH): no tariff list has them — left for the person until the site's non-tariff entry is profiled.
+  const own = investigations.ownItems ?? [];
   const unmapped = [...new Set(coded.filter((i) => !optionFor(i.tariff)).map((i) => i.tariff || 'no tariff'))];
   const invActions: PageAction[] = [
     { type: 'clickTab', text: TAB.investigations, next: NEXT, label: 'Open "2. Investigations and Procedures"' },
@@ -115,7 +122,8 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
       tariffOption: optionFor(i.tariff),
       qty: i.qty,
       amountClaimed: i.amountClaimed,
-      label: `${i.code} ${i.description} — qty ${i.qty}, ${rupees(i.amountClaimed)}`,
+      ...(i.alternatives?.length ? { alternatives: i.alternatives } : {}),
+      label: `${i.code}${orReadings(i.alternatives)} ${i.description} — qty ${i.qty}, ${rupees(i.amountClaimed)}`,
     })),
   ];
 
@@ -150,9 +158,10 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
     {
       key: 'investigations',
       title: '2. Investigations and Procedures',
-      preview: coded.map((i) => `${i.code}${i.tariff ? ` (${i.tariff})` : ''} — ${i.description}${i.lines > 1 ? ` ×${i.lines} lines` : ''} — qty ${i.qty}, ${rupees(i.amountClaimed)}${i.review ? '  ⚠' : ''}`),
+      preview: coded.map((i) => `${i.code}${orReadings(i.alternatives)}${i.tariff ? ` (${i.tariff})` : ''} —${i.description}${i.lines > 1 ? ` ×${i.lines} lines` : ''} — qty ${i.qty}, ${rupees(i.amountClaimed)}${i.review ? '  ⚠' : ''}`),
       manual: [
         ...unmapped.map((t) => `${coded.filter((i) => (i.tariff || 'no tariff') === t).length} code(s) are marked "${t}" on the bill — the site has no tariff type of that name, so they are not added (listed in the result)`),
+        ...own.map((i) => `${i.code} (hospital's own code) ${i.description} — ${i.qty} × ${rupees(i.rate)} = ${rupees(i.amountClaimed)} — in no tariff list: enter it as a non-tariff item${i.notes.length ? ` (${i.notes.join('; ')})` : ''}`),
         ...uncoded.map((i) => `${i.description} — qty ${i.qty}, ${rupees(i.amountClaimed)} — ${i.notes[i.notes.length - 1] || 'enter manually'}`),
         ...(investigations.implants ? [`Implants ${rupees(investigations.implants.amount)} — pick department and implant items, upload the invoice`] : []),
         'Tick the compliance declaration and upload investigation reports',

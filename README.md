@@ -63,9 +63,8 @@ and whether it answers, and **Change** points that browser at another server.
 
 1. Dashboard → **Mappings → Allowed sites**: add `http://localhost:4100` (the
    demo forms). The extension refuses every site that isn't on this list.
-2. Dashboard → **Documents**: upload a PDF. When it shows *Completed*, open it to
-   check and correct the extracted fields. (Or upload from the extension panel:
-   **Upload a PDF**.)
+2. In the extension panel, **Upload a PDF**. (The dashboard no longer has a
+   Documents page: it shows the bills read on the three sites instead.)
 3. Open `http://localhost:4100/demo/forms/hospital-registration.html` (or
    `insurance-preauth.html`, which has the hard cases).
 4. Click the extension icon. The side panel opens; sign in, choose the
@@ -99,21 +98,85 @@ website and try it there.
    steps ran (field names, tariff codes), never what was typed.
 3. Filling stays blocked until the IP number on the site matches the bills —
    checked again before every Fill.
+
+   OCR confuses I with 1 and O with 0, so every field is repaired by what its
+   place can hold: IP / YH numbers, amounts and dates are digits, names have no
+   digits, invoice numbers are `ICO` + 7 digits, and codes follow their shape
+   (`formats/yashoda.js`). The one place a shape cannot settle is the last
+   character of a NIMS code — `78I` (TSH) and `781` are both codes. The panel
+   shows such a code as `78I (or 781)`, and Fill adds the reading whose price on
+   the site equals the bill's rate; when the prices don't settle it, the step
+   is marked for you to check.
 4. For each tab, click **Fill …** and check the result. Fill moves to its tab
    with the site's own Next button when needed (the site's tabs do not open on
    a click); going back is left to you. The extension clicks only Next and the
    add-row buttons. It never saves, submits or ticks declarations.
+
+## Coal India IP claim (e-Arogya Suvidha, Yashoda bills)
+
+1. Approve the site once (`node scripts/allow-site.js https://www.cilbpa.utiitsl.com "Coal India e-BPA"` —
+   with `www.`: the address must match the browser's exactly, and Chrome hides `https://www.`)
+   and enable it in the panel. On `www.cilbpa.utiitsl.com/coal/…` the panel switches to
+   **Bill Details · Coal India**.
+2. Drop the patient's final bill and summary bill. They are read like the TGNPDCL
+   bills (`POST /api/claims/cil`), and nothing is stored.
+3. Open the claim's **Bill Details** tab yourself, then press **Fill Bill Details**:
+   - **Bill No.** comes from the summary bill's invoice number, and **Bill Date** is the discharge date.
+   - **CGHS List Items:** one row per code (CC008, LB037…), with the quantities of all its bill
+     lines added up (CC008 for SDP and blood component transfusion → quantity 2). FillPilot types
+     the code (the site fills in the name), the quantity and the services in Remarks, pressing the
+     blue **+** for each next row. It keeps the site's own rate and marks the rows whose amount
+     differs from the bill.
+   - **Unlisted Procedures:** with the name, quantity and the bill's rate —
+     the hospital's own codes (YSSH, see `OWN_CODES` in `formats/yashoda.js`),
+     the codes Coal India takes as unlisted (BC002, BC006 — `UNLISTED_CODES` in
+     `claims/cil.js`; add a code there to move it), and room rent (Item Code
+     `ROOM RENT`, the bill's description, days × rate per day, Remarks `ROOM RENT`).
+     The site does not take an Unlisted row with Remarks empty: the others get the
+     item's name there.
+   - **Last step:** it checks the Pharmacy Amount and the Grand Total against the bill's net amount.
+4. Left to you, and listed in the panel: Room Details on the Admission tab (the panel
+   reminds you of the days and amount), ICU / ICCU bed charges, doctor fees, lines without a code,
+   the prior-approval tick, update Room / update Date, Save As Draft and Submit IP Bill.
+   FillPilot never presses the red ✗. Rows already on the site are not added twice, so
+   **Fill again** carries on after a stop.
 
 The generic mode (any PDF, any approved site, and the dashboard) does keep
 what it reads in the database — for `RETENTION_DAYS`, without the PDF when
 `KEEP_PDF=false`.
 
 Not filled automatically, and listed in the panel: pharmacy rows (the bill
-has only a total), implants (chosen by department on the site), and
-specializations missing from the bill. If a step can't find something on the
+has only a total), implants (chosen by department on the site),
+specializations missing from the bill, and the hospital's own codes (YSSH —
+in no tariff list; listed apart with name, quantity, rate and amount until the
+site's non-tariff entry is profiled). If a step can't find something on the
 site, its result names the missing label. **Copy page structure** copies the
 page's labels and buttons (no patient data) so the profile in
 `extension/src/panel/tgnpdcl-plan.ts` can be updated.
+
+## Team report (Admin)
+
+Dashboard → **Team report**: per person, for a period (today, last 7 days, this
+month, last month or any dates), the bills read per site (TGNPDCL / PM-JAY /
+Coal India — one final + summary bill is one), PDFs and pages, how many times
+Fill was pressed and the steps it did or could not do, and when they were last
+active. Everyone with an active account is listed, so whoever is not using
+FillPilot shows with zeros. **Export CSV** saves the table.
+
+The same report without the dashboard (only the backend's database is needed):
+
+```powershell
+cd backend
+npm.cmd run team-report -- 2026-10-01 2026-10-31   # both days included; no dates = this month so far
+```
+
+It prints a summary and saves `backend\reports\FillPilot-team-report_<from>_to_<to>.csv`.
+
+It is counts only, built from what is already recorded (`BILLS_READ` in
+`audit_logs`, `fill_sessions`) — no patient names, amounts or values
+(`GET /api/reports/team`, `routes/reports.routes.js`). It counts work done
+through the extension with each person's own sign-in; the standalone package
+below has no server and is not counted.
 
 ## Giving it to a PC that cannot install anything (the client package)
 

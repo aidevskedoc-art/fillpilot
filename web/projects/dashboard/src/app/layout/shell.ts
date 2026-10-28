@@ -12,9 +12,9 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { path: '/dashboard', label: 'Dashboard', icon: 'pi pi-home' },
-  { path: '/documents', label: 'Documents', icon: 'pi pi-file-pdf' },
   { path: '/mappings', label: 'Mappings', icon: 'pi pi-sitemap' },
   { path: '/activity', label: 'Activity', icon: 'pi pi-history' },
+  { path: '/team-report', label: 'Team report', icon: 'pi pi-chart-bar', admin: true },
   { path: '/users', label: 'Users', icon: 'pi pi-users', admin: true },
 ];
 

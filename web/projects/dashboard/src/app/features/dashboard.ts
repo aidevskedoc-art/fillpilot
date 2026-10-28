@@ -1,24 +1,22 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
-import { RouterLink } from '@angular/router';
 import { TagModule } from 'primeng/tag';
-import { ButtonModule } from 'primeng/button';
 import { SkeletonModule } from 'primeng/skeleton';
-import type { DashboardStats } from '@shared/api-types';
-import { pct, statusLabel, statusSeverity } from '@shared/format';
+import type { BillSite, DashboardStats } from '@shared/api-types';
 import { ApiService, errorMessage } from '../core/api.service';
+
+const SITE_NAMES: Record<BillSite, string> = { tgnpdcl: 'TGNPDCL', pmjay: 'PM-JAY', cil: 'Coal India' };
 
 @Component({
   selector: 'app-dashboard',
-  imports: [RouterLink, DatePipe, TagModule, ButtonModule, SkeletonModule],
+  imports: [DatePipe, TagModule, SkeletonModule],
   template: `
     <div class="page">
       <div class="page-header">
         <div>
           <h1 class="text-2xl">Dashboard</h1>
-          <p class="muted">Your documents and form-filling activity</p>
+          <p class="muted">Bills you read and filled with FillPilot in the last 30 days</p>
         </div>
-        <p-button label="Upload PDFs" icon="pi pi-upload" routerLink="/documents" />
       </div>
 
       @if (error()) {
@@ -30,26 +28,29 @@ import { ApiService, errorMessage } from '../core/api.service';
       } @else {
         @let s = stats()!;
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-          <div class="card stat"><div class="label">Total documents</div><div class="value">{{ s.documents.total }}</div></div>
-          <div class="card stat"><div class="label">Processed</div><div class="value text-teal-600">{{ s.documents.processed }}</div></div>
-          <div class="card stat"><div class="label">Pending</div><div class="value text-sky-600">{{ s.documents.pending }}</div></div>
-          <div class="card stat"><div class="label">Failed</div><div class="value text-red-600">{{ s.documents.failed }}</div></div>
+          <div class="card stat"><div class="label">TGNPDCL bills</div><div class="value">{{ s.last30Days.bills.tgnpdcl }}</div></div>
+          <div class="card stat"><div class="label">PM-JAY bills</div><div class="value">{{ s.last30Days.bills.pmjay }}</div></div>
+          <div class="card stat"><div class="label">Coal India bills</div><div class="value">{{ s.last30Days.bills.cil }}</div></div>
+          <div class="card stat">
+            <div class="label">PDFs read</div>
+            <div class="value text-teal-600">{{ s.last30Days.pdfs }}</div>
+            <div class="muted text-xs">{{ s.last30Days.pages }} pages</div>
+          </div>
         </div>
 
         <div class="grid md:grid-cols-3 gap-4">
           <div class="card section md:col-span-2">
-            <div class="section-title">Recent documents</div>
-            @if (s.recent.length === 0) {
-              <p class="muted">No documents yet. <a routerLink="/documents">Upload your first PDF</a>.</p>
+            <div class="section-title">Recent bills</div>
+            @if (s.recentBills.length === 0) {
+              <p class="muted">No bills read yet. Open a bill on TGNPDCL, PM-JAY or Coal India and drop the PDFs into the FillPilot panel.</p>
             } @else {
               <table class="w-full text-sm">
                 <tbody>
-                  @for (d of s.recent; track d.id) {
+                  @for (b of s.recentBills; track $index) {
                     <tr class="border-b border-[var(--app-border)] last:border-0">
-                      <td class="py-2 pr-3"><a [routerLink]="['/documents', d.id]" class="font-medium">{{ d.fileName }}</a></td>
-                      <td class="py-2 pr-3"><p-tag [value]="statusLabel(d.status)" [severity]="statusSeverity(d.status)" /></td>
-                      <td class="py-2 pr-3 muted whitespace-nowrap">{{ d.fieldCount }} fields</td>
-                      <td class="py-2 muted whitespace-nowrap text-right">{{ d.uploadedAt | date: 'd MMM, HH:mm' }}</td>
+                      <td class="py-2 pr-3"><p-tag [value]="siteName(b.site)" severity="secondary" /></td>
+                      <td class="py-2 pr-3 muted whitespace-nowrap">{{ b.pdfs }} PDF{{ b.pdfs === 1 ? '' : 's' }} · {{ b.pages }} pages</td>
+                      <td class="py-2 muted whitespace-nowrap text-right">{{ b.at | date: 'd MMM, HH:mm' }}</td>
                     </tr>
                   }
                 </tbody>
@@ -57,11 +58,15 @@ import { ApiService, errorMessage } from '../core/api.service';
             }
           </div>
           <div class="card section">
-            <div class="section-title">Last 30 days</div>
+            <div class="section-title">Summary</div>
             <dl class="m-0 grid gap-3">
-              <div><dt class="muted text-sm">Forms filled</dt><dd class="m-0 text-xl font-semibold">{{ s.last30Days.fillSessions }}</dd></div>
-              <div><dt class="muted text-sm">Fields filled automatically</dt><dd class="m-0 text-xl font-semibold">{{ s.last30Days.fieldsFilled }} <span class="muted text-sm font-normal">of {{ s.last30Days.fieldsDetected }} detected</span></dd></div>
-              <div><dt class="muted text-sm">Average extraction confidence</dt><dd class="m-0 text-xl font-semibold">{{ pct(s.documents.avgConfidence) }}</dd></div>
+              <div><dt class="muted text-sm">Bills today</dt><dd class="m-0 text-xl font-semibold">{{ s.today.bills }} <span class="muted text-sm font-normal">{{ s.today.pdfs }} PDFs</span></dd></div>
+              <div><dt class="muted text-sm">Bills in the last 30 days</dt><dd class="m-0 text-xl font-semibold">{{ s.last30Days.bills.total }}</dd></div>
+              <div><dt class="muted text-sm">Fills</dt><dd class="m-0 text-xl font-semibold">{{ s.last30Days.fills }} <span class="muted text-sm font-normal">{{ s.last30Days.stepsDone }} steps done</span></dd></div>
+              <div>
+                <dt class="muted text-sm">Steps that failed</dt>
+                <dd class="m-0 text-xl font-semibold" [class.text-red-600]="s.last30Days.stepsFailed > 0">{{ s.last30Days.stepsFailed }}</dd>
+              </div>
             </dl>
           </div>
         </div>
@@ -73,9 +78,10 @@ export class DashboardPage implements OnInit {
   private readonly api = inject(ApiService);
   protected readonly stats = signal<DashboardStats | null>(null);
   protected readonly error = signal('');
-  protected readonly statusLabel = statusLabel;
-  protected readonly statusSeverity = statusSeverity;
-  protected readonly pct = pct;
+
+  protected siteName(site: BillSite) {
+    return SITE_NAMES[site] ?? site;
+  }
 
   async ngOnInit() {
     try {

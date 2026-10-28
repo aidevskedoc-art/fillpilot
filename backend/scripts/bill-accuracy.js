@@ -57,7 +57,9 @@ function snapshot(claim) {
     icuDays: room.icuDays,
     wards: room.wards.map((w) => ({ ratePerDay: w.ratePerDay, days: w.days })),
     doctors: room.doctors.map((d) => ({ name: d.name, days: d.days })),
-    investigations: investigations.items.map((i) => ({ code: i.code ?? null, tariff: i.tariff ?? null, qty: i.qty, amount: i.amountClaimed ?? null, description: i.description })),
+    // The hospital's own codes (YSSH) are bill lines too — counted with the tariff rows.
+    investigations: [...investigations.items, ...(investigations.ownItems || [])]
+      .map((i) => ({ code: i.code ?? null, tariff: i.tariff ?? null, qty: i.qty, amount: i.amountClaimed ?? null, description: i.description })),
   };
 }
 
@@ -97,8 +99,9 @@ function compare(want, got) {
     for (const rest of left.values()) for (const g of rest) extras.push({ area, what: nameOf(g) });
   };
   rows('doctors', want.doctors || [], got.doctors, (d) => normLabel(d.name), (d) => `doctor ${d.name}`, ['days']);
+  // The hospital's own code (YSSH, no digits) names many items — those rows are matched by description too.
   rows('investigations', want.investigations || [], got.investigations,
-    (i) => (i.code ? `${i.code}|${i.tariff || ''}` : `-${normLabel(i.description)}`),
+    (i) => (!i.code ? `-${normLabel(i.description)}` : /\d/.test(i.code) ? `${i.code}|${i.tariff || ''}` : `${i.code}|${normLabel(i.description)}`),
     (i) => (i.code ? `${i.code}${i.tariff ? `/${i.tariff}` : ''} (${i.description})` : `"${i.description}"`),
     ['qty', 'amount']);
   return { checks, extras };

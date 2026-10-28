@@ -8,11 +8,11 @@
 //           (local-account.ts), the approved sites (config.json) and the
 //           activity log (activity-log.ts) live in the extension itself.
 import type {
-  AllowedSite, DocumentDto, FormatResponse, LoginResponse, MatchResponse, PmjayClaim, TgnpdclClaim, UploadResponse, User,
+  AllowedSite, CilClaim, DocumentDto, FormatResponse, LoginResponse, MatchResponse, PmjayClaim, TgnpdclClaim, UploadResponse, User,
 } from '../../../web/projects/shared/src/api-types';
 import type { FieldDescriptor, PageInfo } from '../../../web/projects/shared/src/page-contract';
 import { activityLog } from './activity-log';
-import { billSession, pmjayAdded, pmjaySession } from './bill-session';
+import { billSession, cilSession, pmjayAdded, pmjaySession } from './bill-session';
 import { FirstLogin, localAccount } from './local-account';
 
 const SESSION_KEY = 'pfa.session';
@@ -193,6 +193,7 @@ class PanelApi {
     await billSession.clear();
     await pmjaySession.clear();
     await pmjayAdded.clear();
+    await cilSession.clear();
   }
 
   completedDocuments = async () =>
@@ -244,6 +245,13 @@ class PanelApi {
     const form = new FormData();
     files.forEach((f) => form.append('files', f, f.name));
     return this.call<PmjayClaim>('POST', '/api/claims/pmjay', form);
+  }
+
+  /** The same bills, read for the Coal India claim's Bill Details (e-Arogya Suvidha). Nothing is kept on the server. */
+  readCilBills(files: File[]): Promise<CilClaim> {
+    const form = new FormData();
+    files.forEach((f) => form.append('files', f, f.name));
+    return this.call<CilClaim>('POST', '/api/claims/cil', form);
   }
 }
 

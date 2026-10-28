@@ -10,10 +10,9 @@ export const routes: Routes = [
     children: [
       { path: '', pathMatch: 'full', redirectTo: 'dashboard' },
       { path: 'dashboard', title: 'Dashboard', loadComponent: () => import('./features/dashboard').then((m) => m.DashboardPage) },
-      { path: 'documents', title: 'Documents', loadComponent: () => import('./features/documents').then((m) => m.DocumentsPage) },
-      { path: 'documents/:id', title: 'Document', loadComponent: () => import('./features/document-detail').then((m) => m.DocumentDetailPage) },
       { path: 'mappings', title: 'Mappings', loadComponent: () => import('./features/mappings').then((m) => m.MappingsPage) },
       { path: 'activity', title: 'Activity', loadComponent: () => import('./features/activity').then((m) => m.ActivityPage) },
+      { path: 'team-report', title: 'Team report', canActivate: [adminGuard], loadComponent: () => import('./features/team-report').then((m) => m.TeamReportPage) },
       { path: 'users', title: 'Users', canActivate: [adminGuard], loadComponent: () => import('./features/users').then((m) => m.UsersPage) },
     ],
   },
