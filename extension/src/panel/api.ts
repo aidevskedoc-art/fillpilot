@@ -8,7 +8,8 @@
 //           (local-account.ts), the approved sites (config.json) and the
 //           activity log (activity-log.ts) live in the extension itself.
 import type {
-  AllowedSite, CilClaim, DocumentDto, FormatResponse, LoginResponse, MatchResponse, PmjayClaim, TgnpdclClaim, UploadResponse, User,
+  AllowedSite, CilClaim, DocumentDto, FormatResponse, LoginResponse, MatchResponse, PmjayClaim, SpdclSheet, SpdclTariff, TgnpdclClaim,
+  UploadResponse, User,
 } from '../../../web/projects/shared/src/api-types';
 import type { FieldDescriptor, PageInfo } from '../../../web/projects/shared/src/page-contract';
 import { activityLog } from './activity-log';
@@ -252,6 +253,20 @@ class PanelApi {
     const form = new FormData();
     files.forEach((f) => form.append('files', f, f.name));
     return this.call<CilClaim>('POST', '/api/claims/cil', form);
+  }
+
+  /**
+   * The HIS final bill and pharmacy bill Excel files → the SPDCL upload file
+   * (base64) and what is in it. admissionDate "dd/mm/yyyy" dates the bill's
+   * undated lines; without it the earliest date on the bills is used. Nothing is kept on the server.
+   */
+  makeSpdclExcel(files: File[], options: { admissionDate?: string | null; tariffType?: SpdclTariff } = {}): Promise<SpdclSheet> {
+    const form = new FormData();
+    // Fields before the files, so the server has them when the files arrive.
+    if (options.admissionDate) form.append('admissionDate', options.admissionDate);
+    if (options.tariffType) form.append('tariffType', options.tariffType);
+    files.forEach((f) => form.append('files', f, f.name));
+    return this.call<SpdclSheet>('POST', '/api/claims/spdcl', form);
   }
 }
 

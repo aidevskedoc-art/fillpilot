@@ -135,6 +135,48 @@ export interface CilClaim {
   checks: ClaimCheck[];
 }
 
+/** TARIFF_TYPE of the SPDCL upload file (column A), as the template's dropdown lists them. */
+export type SpdclTariff = 'CGHS' | 'EHS' | 'NIMS_2015' | 'COVID_TARIFF';
+
+/** One row of the SPDCL upload file (backend/src/claims/spdcl.js). Amount = rate × qty. */
+export interface SpdclRow {
+  /** Service_Type, spelled as SPDCL's "Heads" list ("Emergency  " has two trailing spaces). */
+  head: string;
+  code: string | null;
+  description: string;
+  /** dd/mm/yyyy; null only when no date could be worked out. */
+  date: string | null;
+  rate: number;
+  qty: number;
+  amount: number;
+  /** The final-bill section it came from, or "Pharmacy". */
+  section: string;
+}
+
+/**
+ * POST /api/claims/spdcl (the HIS final bill and pharmacy bill .xlsx, multipart;
+ * optional admissionDate and tariffType) — the SPDCL upload file, ready to save,
+ * and what is in it. Kept by neither the server nor the panel.
+ */
+export interface SpdclSheet {
+  documents: { fileName: string; kind: 'final-bill' | 'pharmacy-bill' }[];
+  patient: { name: string | null; ipNo: string | null };
+  tariffType: SpdclTariff;
+  /** dd/mm/yyyy: typed by the person, or (admissionAssumed) the earliest date on the bills. */
+  admissionDate: string | null;
+  admissionAssumed: boolean;
+  lastDate: string | null;
+  /** ICU + room-rent days: what "N Time(s)" lines are spread over. */
+  stayDays: number;
+  rows: SpdclRow[];
+  heads: { head: string; rows: number; amount: number }[];
+  /** excel: the file's Total Amount (returns taken off); hisBill: the final bill's Grand Total; difference = hisBill − excel. */
+  totals: { excel: number; hisBill: number | null; netAmount: number | null; pharmacyBill: number | null; difference: number };
+  checks: ClaimCheck[];
+  fileName: string;
+  fileBase64: string;
+}
+
 export interface UploadResponse {
   documents: DocumentDto[];
   rejected: { fileName: string; error: string }[];
@@ -166,7 +208,7 @@ export interface ExtractedTable {
 }
 
 /** The sites whose bills FillPilot reads (BILLS_READ in the activity log). */
-export type BillSite = 'tgnpdcl' | 'pmjay' | 'cil';
+export type BillSite = 'tgnpdcl' | 'pmjay' | 'cil' | 'spdcl';
 
 /** GET /api/dashboard/stats — the caller's own work; one final + summary bill read = 1 bill. */
 export interface DashboardStats {

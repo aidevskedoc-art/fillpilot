@@ -108,6 +108,8 @@ svg { flex: none; }
 
 /* ---------------------------------------------------------------- controls */
 .field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.spdcl-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.spdcl-options .input-sm { margin-top: 0; color-scheme: light dark; }
 .input {
   width: 100%; min-width: 0;
   font: inherit; color: var(--text);

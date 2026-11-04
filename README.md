@@ -154,6 +154,42 @@ site, its result names the missing label. **Copy page structure** copies the
 page's labels and buttons (no patient data) so the profile in
 `extension/src/panel/tgnpdcl-plan.ts` can be updated.
 
+## SPDCL Excel (from the HIS Excel exports)
+
+The SPDCL site takes a claim only as an Excel upload in its own template. In
+the panel, press **SPDCL Excel from the HIS files** (on any page — it does not
+touch a website), drop the patient's two HIS exports (`final-bill.xlsx` and
+`pharmacy-bill.xlsx`), check the result and press **Download SPDCL Excel**.
+Upload that file on the SPDCL site yourself.
+
+- The file is SPDCL's own blank template (`backend/src/claims/spdcl-template.xlsx`)
+  with its **Test** sheet filled: one row per service or medicine per day, Amount
+  `=G*H`, Total `=I-J`, dates as text `dd/mm/yyyy`. The Heads sheet, the dropdowns
+  and the hidden column L stay as in the template. If SPDCL changes its template,
+  replace that file.
+- **Service_Type**: Room Rent, Intensive Care Units, bed side procedures →
+  `Emergency  `, blood transfusion → Blood Bank, doctor fees → Consulation Charges,
+  pharmacy items → Pharmacy/Drugs/Medicine Charges, every other section →
+  Investigations. A section FillPilot has not seen before is flagged (`claims/spdcl.js`).
+- **Dates** for lines the bill prints without one: the admission date is the
+  earliest date on the bills (change it in the panel); ICU days run from it, room
+  rent straight after; `N Day(s)/Visit(s)/Unit(s)` lines give N rows a day apart;
+  `N Time(s)` (RBS) is spread over the billed days; the same undated item again
+  goes on the next day; pharmacy items take their indent's date.
+- `POST /api/claims/spdcl` reads the files in memory and stores nothing; it also
+  runs in the client package. The Excel files are read and written without any
+  extra package (`claims/xlsx.js`).
+
+To check it on real files (they stay where they are — never add them to the repo):
+
+```powershell
+cd backend
+node scripts\spdcl-compare.js "<final-bill.xlsx>" "<pharmacy-bill.xlsx>" "<the team's SPDCL Excel.xlsx>" --out "$env:TEMP\SPDCL-check.xlsx"
+```
+
+It prints the rows per head, the totals and the checks, and every cell that
+differs from the hand-made file.
+
 ## Team report (Admin)
 
 Dashboard → **Team report**: per person, for a period (today, last 7 days, this
@@ -218,8 +254,8 @@ ships with it). It has **no database**:
   (`panel/local-account.ts`), the approved websites (`config.json`) and the
   activity log (`panel/activity-log.ts`, **Export activity log** in the panel)
   live in Chrome's own storage;
-- it fills TGNPDCL bills only — the dashboard and the any-PDF mode need the
-  full backend with PostgreSQL.
+- it fills TGNPDCL bills and makes the SPDCL Excel — the dashboard and the
+  any-PDF mode need the full backend with PostgreSQL.
 
 The only program in the package is `node.exe`, which is digitally signed.
 That is deliberate: PCs that stop unsigned programs running from ordinary
@@ -229,7 +265,7 @@ folders killed an earlier package that carried PostgreSQL.
 
 ```powershell
 cd backend
-npm.cmd run test-unit     # normalization, extraction on real PDFs, matching rules
+npm.cmd run test-unit     # normalization, extraction on real PDFs, matching rules, SPDCL Excel
 npm.cmd run test-routes   # HTTP + PostgreSQL (uses a separate pdf_form_db_test database)
 npm.cmd run profile-pdf -- path\to\file.pdf all   # see how a new PDF layout is read
 ```

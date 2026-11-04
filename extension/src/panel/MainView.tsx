@@ -6,7 +6,7 @@ import { api, messageOf } from './api';
 import { ActiveTab, bridge } from './page-bridge';
 import { ReviewRow, toRow } from './review-model';
 import { GuideOverlay } from './Guide';
-import { ArrowRightIcon, BoltIcon, InfoIcon, LogOutIcon, MoonIcon, RefreshIcon, ScanIcon, SettingsIcon, ShieldIcon, SunIcon } from './Icons';
+import { ArrowRightIcon, BoltIcon, InfoIcon, LogOutIcon, MoonIcon, RefreshIcon, ScanIcon, SettingsIcon, SheetIcon, ShieldIcon, SunIcon } from './Icons';
 import { Logo } from './Logo';
 import { Settings } from './Settings';
 import { TgnpdclView } from './TgnpdclView';
@@ -15,6 +15,7 @@ import { PmjayView } from './PmjayView';
 import { isPmjayPage } from './pmjay-plan';
 import { CilView } from './CilView';
 import { isCilPage } from './cil-plan';
+import { SpdclView } from './SpdclView';
 import { Theme, applyTheme, savedTheme } from './theme';
 import { UploadPdfs } from './UploadPdfs';
 
@@ -54,6 +55,8 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [theme, setTheme] = useState<Theme>(savedTheme);
   const [settings, setSettings] = useState(false);
   const [guide, setGuide] = useState(false);
+  /** The SPDCL Excel tool is open: it needs no website, so it shows in place of the site's view. */
+  const [spdcl, setSpdcl] = useState(false);
   const [copied, setCopied] = useState('');
   const closeGuide = useCallback(() => setGuide(false), []);
 
@@ -323,6 +326,7 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
         </div>
       )}
 
+      {!spdcl && (
       <section className="section">
         <div className="label">Website</div>
         {siteState === 'ready' && (
@@ -365,9 +369,15 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
           </>
         )}
         {siteState === 'no-tab' && <p className="muted small">No active tab.</p>}
+        <button type="button" className="btn btn-secondary btn-sm btn-block mt" onClick={() => setSpdcl(true)}>
+          <SheetIcon size={14} /> SPDCL Excel from the HIS files
+        </button>
       </section>
+      )}
 
-      {siteState === 'ready' && tab && isTgnpdclBillPage(tab.url) ? (
+      {spdcl ? (
+        <SpdclView onClose={() => setSpdcl(false)} onError={setError} />
+      ) : siteState === 'ready' && tab && isTgnpdclBillPage(tab.url) ? (
         <TgnpdclView tab={tab} onError={setError} />
       ) : siteState === 'ready' && tab && isPmjayPage(tab.url) && api.mode !== 'reader' ? (
         <PmjayView tab={tab} onError={setError} />

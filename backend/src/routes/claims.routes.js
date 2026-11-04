@@ -1,6 +1,7 @@
-// Reads hospital bill PDFs and returns what a target website's multi-step
-// form needs — and keeps nothing: the PDFs are read from memory, and neither
-// they nor what was read from them is written to disk or to the database.
+// Reads hospital bill PDFs (and, for SPDCL, the HIS Excel exports) and returns
+// what a target website needs — and keeps nothing: the files are read from
+// memory, and neither they nor what was read from them is written to disk or
+// to the database.
 // The caller (the extension panel) holds the result only while it fills the
 // form. The bill is needed for that and for nothing afterwards.
 const express = require('express');
@@ -9,6 +10,9 @@ const { extractDocument, ExtractionError, PdfReadError } = require('../extractio
 const { buildTgnpdclClaim } = require('../claims/tgnpdcl');
 const { buildPmjayClaim } = require('../claims/pmjay');
 const { buildCilClaim } = require('../claims/cil');
+const { readFirstSheet, XlsxError } = require('../claims/xlsx');
+const spdcl = require('../claims/spdcl');
+const { writeSpdclWorkbook } = require('../claims/spdcl-workbook');
 
 const router = express.Router();
 
@@ -124,6 +128,71 @@ router.post('/cil', upload.array('files', MAX_FILES), route(async (req, res) => 
   const claim = buildCilClaim({ final: bills.final, summary: bills.summary });
   await logRead(req, bills.read, 'cil');
   res.json({ documents: bills.documents, ...claim });
+}));
+
+const ZIP = Buffer.from('PK\x03\x04', 'latin1');
+const OLD_EXCEL = Buffer.from('d0cf11e0', 'hex');
+
+// POST /api/claims/spdcl — multipart "files": the HIS final bill and pharmacy bill
+// Excel files (.xlsx); optional fields admissionDate (dd/mm/yyyy) and tariffType.
+// → the SPDCL upload file (base64) and what is in it. Nothing is stored.
+// Not queued behind PDF reading (inTurn): an Excel file is read in milliseconds.
+router.post('/spdcl', upload.array('files', MAX_FILES), route(async (req, res) => {
+  const files = req.files || [];
+  if (!files.length) return res.status(400).json({ error: 'Choose the HIS final bill and pharmacy bill Excel files' });
+
+  const admissionDate = String(req.body?.admissionDate || '').trim() || null;
+  if (admissionDate && spdcl.dayOf(admissionDate) == null) return res.status(400).json({ error: 'Admission date must be a date like 26/09/2026' });
+  const tariffType = String(req.body?.tariffType || 'EHS');
+  if (!spdcl.TARIFF_TYPES.includes(tariffType)) return res.status(400).json({ error: `Tariff type must be one of ${spdcl.TARIFF_TYPES.join(', ')}` });
+
+  const sheets = [];
+  for (const file of files) {
+    const fileName = String(file.originalname || 'file.xlsx').slice(0, 255);
+    // Trust the bytes, not the extension or the browser's mime type.
+    const head = file.buffer.subarray(0, 4);
+    if (head.equals(OLD_EXCEL)) {
+      return res.status(422).json({ error: `${fileName} is an old .xls file — open it in Excel, save it as "Excel Workbook (.xlsx)" and choose that` });
+    }
+    if (!head.equals(ZIP)) return res.status(422).json({ error: `${fileName} is not an Excel (.xlsx) file` });
+    try {
+      sheets.push({ fileName, ...readFirstSheet(file.buffer) });
+    } catch (err) {
+      if (err instanceof XlsxError) return res.status(422).json({ error: `${fileName}: ${err.message}` });
+      throw err;
+    }
+  }
+
+  const finals = sheets.filter(spdcl.isFinalBill);
+  const pharmacies = sheets.filter((s) => !spdcl.isFinalBill(s) && spdcl.isPharmacyBill(s));
+  const others = sheets.filter((s) => !finals.includes(s) && !pharmacies.includes(s));
+  if (others.length) {
+    return res.status(422).json({ error: `${others.map((s) => s.fileName).join(', ')}: not the HIS final bill or pharmacy bill Excel` });
+  }
+  if (!finals.length) return res.status(422).json({ error: 'None of these files is the HIS final bill (the sheet with "Charged Amount")' });
+  if (finals.length > 1 || pharmacies.length > 1) {
+    return res.status(422).json({ error: 'These files hold more than one final or pharmacy bill — choose one patient\'s two files' });
+  }
+
+  const final = spdcl.parseFinalBill(finals[0].rows);
+  const pharmacy = pharmacies.length ? spdcl.parsePharmacyBill(pharmacies[0].rows) : null;
+  const sheet = spdcl.buildSpdclSheet({ final, pharmacy, admissionDate, tariffType });
+  // Two patients' bills must never become one claim file.
+  const mixed = sheet.checks.find((c) => c.level === 'error' && /different patients/.test(c.message));
+  if (mixed) return res.status(422).json({ error: mixed.message });
+  const ipDigits = String(sheet.patient.ipNo || '').replace(/[^0-9A-Za-z]/g, '');
+  const file = writeSpdclWorkbook(sheet);
+  // Logged as a read like the PDF sites: two files, no pages.
+  await logRead(req, files.map(() => ({ pageCount: 0 })), 'spdcl');
+  res.json({
+    documents: [
+      { fileName: finals[0].fileName, kind: 'final-bill' },
+      ...pharmacies.map((p) => ({ fileName: p.fileName, kind: 'pharmacy-bill' })),
+    ],
+    ...sheet,
+    fileName: `SPDCL-${ipDigits || 'bill'}.xlsx`,
+    fileBase64: file.toString('base64'),
+  });
 }));
 
 module.exports = router;

@@ -10,6 +10,13 @@ backend/storage/
 backend/storage-test/
 backend/test-fixtures/
 
+# HIS Excel exports and SPDCL upload files hold patient data too. The one
+# allowed is SPDCL's blank template, which the SPDCL Excel is built from.
+*.xlsx
+*.xls
+*.csv
+!backend/src/claims/spdcl-template.xlsx
+
 # Team reports exported by scripts/team-report.js (staff names and counts)
 backend/reports/
 

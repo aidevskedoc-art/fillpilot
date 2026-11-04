@@ -7,6 +7,8 @@
 // It exists so that a problem on someone's PC can be understood without
 // seeing their screen: "Export activity log" saves it as a file to send.
 
+import { saveFile } from './save-file';
+
 const KEY = 'fillpilot.activity';
 /** The latest runs are enough to diagnose a problem; older ones are dropped. */
 const KEEP = 30;
@@ -31,11 +33,7 @@ export const activityLog = {
   async download(): Promise<number> {
     const list = await read();
     const file = new Blob([JSON.stringify({ app: 'FillPilot', version: chrome.runtime.getManifest().version, exportedAt: new Date().toISOString(), entries: list }, null, 1)], { type: 'application/json' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(file);
-    link.download = `fillpilot-activity-${new Date().toISOString().slice(0, 10)}.json`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+    saveFile(file, `fillpilot-activity-${new Date().toISOString().slice(0, 10)}.json`);
     return list.length;
   },
 };

@@ -5,7 +5,7 @@ import { SkeletonModule } from 'primeng/skeleton';
 import type { BillSite, DashboardStats } from '@shared/api-types';
 import { ApiService, errorMessage } from '../core/api.service';
 
-const SITE_NAMES: Record<BillSite, string> = { tgnpdcl: 'TGNPDCL', pmjay: 'PM-JAY', cil: 'Coal India' };
+const SITE_NAMES: Record<BillSite, string> = { tgnpdcl: 'TGNPDCL', pmjay: 'PM-JAY', cil: 'Coal India', spdcl: 'SPDCL Excel' };
 
 @Component({
   selector: 'app-dashboard',
