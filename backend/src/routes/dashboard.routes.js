@@ -7,7 +7,7 @@ const router = express.Router();
 const DAY = 24 * 60 * 60 * 1000;
 
 // GET /api/dashboard/stats — the caller's own bills read (TGNPDCL, PM-JAY, Coal
-// India) and fills. Counts only: the bills themselves are never stored.
+// India, BHEL) and fills. Counts only: the bills themselves are never stored.
 router.get('/stats', route(async (req, res) => {
   const userId = req.user.sub;
   const since = new Date(Date.now() - 30 * DAY);
@@ -18,6 +18,7 @@ router.get('/stats', route(async (req, res) => {
       `SELECT COUNT(*) FILTER (WHERE details->>'site' = 'tgnpdcl')::int AS tgnpdcl,
               COUNT(*) FILTER (WHERE details->>'site' = 'pmjay')::int AS pmjay,
               COUNT(*) FILTER (WHERE details->>'site' = 'cil')::int AS cil,
+              COUNT(*) FILTER (WHERE details->>'site' = 'bhel')::int AS bhel,
               COALESCE(SUM((details->>'files')::int), 0)::int AS pdfs,
               COALESCE(SUM((details->>'pages')::int), 0)::int AS pages,
               COUNT(*) FILTER (WHERE created_at >= $3)::int AS today_bills,
@@ -44,7 +45,7 @@ router.get('/stats', route(async (req, res) => {
   res.json({
     today: { bills: b.today_bills, pdfs: b.today_pdfs },
     last30Days: {
-      bills: { tgnpdcl: b.tgnpdcl, pmjay: b.pmjay, cil: b.cil, total: b.tgnpdcl + b.pmjay + b.cil },
+      bills: { tgnpdcl: b.tgnpdcl, pmjay: b.pmjay, cil: b.cil, bhel: b.bhel, total: b.tgnpdcl + b.pmjay + b.cil + b.bhel },
       pdfs: b.pdfs,
       pages: b.pages,
       fills: f.fills,

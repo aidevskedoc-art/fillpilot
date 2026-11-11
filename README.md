@@ -17,6 +17,10 @@ extension/   Chrome MV3 extension, bundled with esbuild (build.mjs)
   src/panel/           side panel (React): sign in, choose document, review, Fill
 ```
 
+**Requirements:** `docs/FillPilot-Requirements.docx` lists what FillPilot must do,
+the business rules per portal and the status of each part. Update it in the same
+change as any new feature or rule (requirement row, revision history, version).
+
 Extraction and matching are **rule-based**: no AI, and no data leaves your server.
 `AI_PROVIDER` is reserved for an optional assist layer later. Never send patient
 data to a free-tier AI API.
@@ -40,10 +44,11 @@ page). If sign-in fails, or the account got locked after 5 attempts, run
 `npm.cmd run reset-admin`. That resets the Admin to the `.env` values and unlocks it.
 
 ```powershell
-# 2. Dashboard (new terminal)
+# 2. Dashboard
 cd web
 npm.cmd install
-npm.cmd start          # http://localhost:4300 (proxies /api to :4100)
+npm.cmd run build      # the backend then serves it: http://localhost:4100/ (other PCs: http://<server PC>:4100/)
+# while changing the dashboard itself: npm.cmd start → http://localhost:4300 (proxies /api to :4100)
 
 # 3. Extension (the side panel is React, bundled by esbuild — no Angular build needed)
 cd extension
@@ -157,8 +162,8 @@ page's labels and buttons (no patient data) so the profile in
 ## SPDCL Excel (from the HIS Excel exports)
 
 The SPDCL site takes a claim only as an Excel upload in its own template. In
-the panel, press **SPDCL Excel from the HIS files** (on any page — it does not
-touch a website), drop the patient's two HIS exports (`final-bill.xlsx` and
+the panel, open the **Excel & PDF** tab (on any page — it does not touch a
+website), drop the patient's two HIS exports (`final-bill.xlsx` and
 `pharmacy-bill.xlsx`), check the result and press **Download SPDCL Excel**.
 Upload that file on the SPDCL site yourself.
 
@@ -190,20 +195,84 @@ node scripts\spdcl-compare.js "<final-bill.xlsx>" "<pharmacy-bill.xlsx>" "<the t
 It prints the rows per head, the totals and the checks, and every cell that
 differs from the hand-made file.
 
-## Team report (Admin)
+## TG Transco Excel (from the same HIS Excel exports)
+
+TG Transco takes a bill as its own Excel template, filled, sent with the bill
+documents (their **Instructions** sheet says how). In the panel's **Excel & PDF**
+tab choose **TG Transco Excel**, drop the same two HIS exports, enter the
+**date of discharge** and **date of surgery** (the bills do not have them), check
+the result and press **Download TG Transco Excel**. The file is named
+`<IP> - TG TRANSCO.xlsx`, as the team names it. Download waits until those dates
+are in (the date of surgery only when the bill has surgery or implants): without
+them the surgery and implant rows have no Service Date, which TG Transco requires.
+
+- The file is TG Transco's own blank template (`backend/src/claims/tgtransco-template.xlsx`)
+  with its **Test** sheet filled in the template's own cells: S.No., TARIFF_TYPE
+  (EHS SUPERSPECIALITY unless chosen), Package/Non-Package, Service_Type, Tariff
+  Code, Service Details, date as text `dd.mm.yyyy`, Unit Rate, Quantity, Amount
+  `=+H*I`. The date box (N4:N6) gets the admission, discharge and surgery dates.
+  The Instructions and Example Bill sheets and the dropdowns stay as in the template.
+- **Service_Type**: Room Rent (in the team's words, "ROOM RENT (Includes Medical and
+  Nursing Charges )"), ICU, doctor fees → CONSULTATION (`Dr.NAME`), cardiology,
+  laboratory and radiology → INVESTIGATIONS, SURGERY CHARGES, medical appliances →
+  IMPLANTS/MEDICAL APPLIANCES, every pharmacy-bill item → PHARMACY, blood transfusion,
+  catheterisation and any other section → OTHERS (a section not seen before is flagged).
+- **PACKAGE** for surgery and implants, and for any row dated on or after the date
+  of surgery (TG Transco: "Package starts from the date of surgery"); NON PACKAGE otherwise.
+- **Codes** lose their tariff mark (`3055/NIMS` → `3055`, `R171+R171/NIM` → `R171+R171`).
+- **Dates** as for SPDCL (`claims/spdcl.js` `buildDailyRows`), except: surgery and
+  implants go on the date of surgery, and a test billed twice without a date stays
+  on the same day. A pharmacy item whose price × qty is not its value gets value ÷ qty
+  to 3 decimals as its rate, so the file adds up to the bill.
+- `POST /api/claims/tgtransco` reads the files in memory and stores nothing.
+
+To check it on real files (`--discharge` / `--surgery` as the panel would send them):
+
+```powershell
+cd backend
+node scripts\tgtransco-compare.js "<final-bill.xlsx>" "<pharmacy-bill.xlsx>" "<the team's TG TRANSCO.xlsx>" --discharge 06/08/2026 --surgery 03/08/2026
+```
+
+It matches every row with the hand-made file in any order (the team orders rows
+by hand) and lists the rows only one of them has.
+
+## Units and logins
+
+The dashboard is served by the backend itself: open **http://<server PC>:4100/**
+in Chrome (on the server PC: http://localhost:4100/) after `npm.cmd run build` in
+`web`. Staff sign in to the extension; logins are made on the dashboard's
+**Users** page.
+
+The hospital's units are Hitech City (HTC), Somajiguda (SMJ), Secunderabad (SEC)
+and Malakpet (MLK) — the `units` table, seeded by `sql/schema.sql`. Every User
+and Unit admin belongs to one:
+
+| Role | Can do |
+|---|---|
+| User | their own work |
+| Unit admin | add and edit their unit's Users; see their unit's activity, audit log and team report |
+| Main admin (`Admin`) | every unit and every role; approves websites |
+
+Accounts made before units existed show **No unit** until the Main admin gives
+them one. The rules are in `backend/src/user-scope.js` (tests:
+`npm.cmd run test-user-scope`).
+
+## Team report (Main admin, Unit admins)
 
 Dashboard → **Team report**: per person, for a period (today, last 7 days, this
 month, last month or any dates), the bills read per site (TGNPDCL / PM-JAY /
-Coal India — one final + summary bill is one), PDFs and pages, how many times
+Coal India / BHEL — one final + summary bill is one), PDFs and pages, how many times
 Fill was pressed and the steps it did or could not do, and when they were last
 active. Everyone with an active account is listed, so whoever is not using
-FillPilot shows with zeros. **Export CSV** saves the table.
+FillPilot shows with zeros. **Export CSV** saves the table. The Main admin picks
+a unit or all of them; a Unit admin always sees their own unit.
 
 The same report without the dashboard (only the backend's database is needed):
 
 ```powershell
 cd backend
-npm.cmd run team-report -- 2026-10-01 2026-10-31   # both days included; no dates = this month so far
+npm.cmd run team-report -- 2026-10-01 2026-10-31       # both days included; no dates = this month so far
+npm.cmd run team-report -- 2026-10-01 2026-10-31 SMJ   # one unit only
 ```
 
 It prints a summary and saves `backend\reports\FillPilot-team-report_<from>_to_<to>.csv`.
@@ -254,7 +323,7 @@ ships with it). It has **no database**:
   (`panel/local-account.ts`), the approved websites (`config.json`) and the
   activity log (`panel/activity-log.ts`, **Export activity log** in the panel)
   live in Chrome's own storage;
-- it fills TGNPDCL bills and makes the SPDCL Excel — the dashboard and the
+- it fills TGNPDCL bills and makes the SPDCL and TG Transco Excel files — the dashboard and the
   any-PDF mode need the full backend with PostgreSQL.
 
 The only program in the package is `node.exe`, which is digitally signed.
@@ -265,7 +334,7 @@ folders killed an earlier package that carried PostgreSQL.
 
 ```powershell
 cd backend
-npm.cmd run test-unit     # normalization, extraction on real PDFs, matching rules, SPDCL Excel
+npm.cmd run test-unit     # normalization, extraction on real PDFs, matching rules, SPDCL and TG Transco Excel
 npm.cmd run test-routes   # HTTP + PostgreSQL (uses a separate pdf_form_db_test database)
 npm.cmd run profile-pdf -- path\to\file.pdf all   # see how a new PDF layout is read
 ```

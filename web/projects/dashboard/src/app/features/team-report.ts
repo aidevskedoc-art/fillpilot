@@ -5,9 +5,11 @@ import { TableModule } from 'primeng/table';
 import { ButtonModule } from 'primeng/button';
 import { InputTextModule } from 'primeng/inputtext';
 import { TagModule } from 'primeng/tag';
+import { SelectModule } from 'primeng/select';
 import { MessageService } from 'primeng/api';
-import type { TeamReport, TeamReportRow } from '@shared/api-types';
+import type { TeamReport, TeamReportRow, Unit } from '@shared/api-types';
 import { ApiService, errorMessage } from '../core/api.service';
+import { AuthService } from '../core/auth.service';
 
 type Preset = 'today' | 'week' | 'month' | 'lastMonth';
 
@@ -42,12 +44,12 @@ const used = (r: TeamReportRow) => r.bills.total > 0 || r.fills > 0 || r.uploads
 
 @Component({
   selector: 'app-team-report',
-  imports: [DatePipe, FormsModule, TableModule, ButtonModule, InputTextModule, TagModule],
+  imports: [DatePipe, FormsModule, TableModule, ButtonModule, InputTextModule, TagModule, SelectModule],
   template: `
     <div class="page">
       <div class="page-header">
         <div>
-          <h1 class="text-2xl">Team report</h1>
+          <h1 class="text-2xl">Team report{{ unit() ? ' · ' + unitName(unit()) : '' }}</h1>
           <p class="muted">Bills each person read and filled with FillPilot. Counts only, with no patient details.</p>
         </div>
         <p-button label="Export CSV" icon="pi pi-download" [outlined]="true" [disabled]="!report()" (onClick)="exportCsv()" />
@@ -59,6 +61,11 @@ const used = (r: TeamReportRow) => r.bills.total > 0 || r.fills > 0 || r.uploads
             <p-button [label]="p.label" size="small" [outlined]="preset() !== p.key" (onClick)="choose(p.key)" />
           }
         </div>
+        @if (auth.isAdmin()) {
+          <label class="text-sm">Unit<br />
+            <p-select [options]="unitOptions()" optionLabel="label" optionValue="value" [ngModel]="unitChoice()" (ngModelChange)="chooseUnit($event)" appendTo="body" />
+          </label>
+        }
         <div class="flex items-end gap-2 ml-auto">
           <label class="text-sm">From<br /><input pInputText type="date" [ngModel]="from()" (ngModelChange)="setRange($event, to())" [max]="to()" /></label>
           <label class="text-sm">To<br /><input pInputText type="date" [ngModel]="to()" (ngModelChange)="setRange(from(), $event)" [min]="from()" /></label>
@@ -70,7 +77,7 @@ const used = (r: TeamReportRow) => r.bills.total > 0 || r.fills > 0 || r.uploads
           <div class="card stat">
             <div class="label">Bills read</div>
             <div class="value">{{ totals().bills }}</div>
-            <div class="muted text-xs">TGNPDCL {{ totals().tgnpdcl }} · PM-JAY {{ totals().pmjay }} · Coal India {{ totals().cil }}</div>
+            <div class="muted text-xs">TGNPDCL {{ totals().tgnpdcl }} · PM-JAY {{ totals().pmjay }} · Coal India {{ totals().cil }} · BHEL {{ totals().bhel }}</div>
           </div>
           <div class="card stat">
             <div class="label">PDFs read</div>
@@ -92,7 +99,7 @@ const used = (r: TeamReportRow) => r.bills.total > 0 || r.fills > 0 || r.uploads
           <p-table [value]="r.rows" size="small" [rowHover]="true" [scrollable]="true">
             <ng-template #header>
               <tr>
-                <th>Person</th><th class="text-right">TGNPDCL</th><th class="text-right">PM-JAY</th><th class="text-right">Coal India</th>
+                <th>Person</th>@if (!unit()) { <th>Unit</th> }<th class="text-right">TGNPDCL</th><th class="text-right">PM-JAY</th><th class="text-right">Coal India</th><th class="text-right">BHEL</th>
                 <th class="text-right">Bills</th><th class="text-right">PDFs</th><th class="text-right">Pages</th>
                 @if (showUploads()) { <th class="text-right">Other PDFs</th> }
                 <th class="text-right">Fills</th><th class="text-right">Steps done</th><th class="text-right">Failed</th><th>Last active</th>
@@ -107,9 +114,11 @@ const used = (r: TeamReportRow) => r.bills.total > 0 || r.fills > 0 || r.uploads
                   </div>
                   <div class="muted text-xs mono">{{ u.username }}</div>
                 </td>
+                @if (!unit()) { <td class="mono">{{ u.unit || '—' }}</td> }
                 <td class="text-right">{{ u.bills.tgnpdcl }}</td>
                 <td class="text-right">{{ u.bills.pmjay }}</td>
                 <td class="text-right">{{ u.bills.cil }}</td>
+                <td class="text-right">{{ u.bills.bhel }}</td>
                 <td class="text-right font-semibold">{{ u.bills.total }}</td>
                 <td class="text-right">{{ u.pdfs }}</td>
                 <td class="text-right">{{ u.pages }}</td>
@@ -120,7 +129,7 @@ const used = (r: TeamReportRow) => r.bills.total > 0 || r.fills > 0 || r.uploads
                 <td class="whitespace-nowrap">{{ u.lastActive ? (u.lastActive | date: 'd MMM y, HH:mm') : 'Never' }}</td>
               </tr>
             </ng-template>
-            <ng-template #emptymessage><tr><td colspan="12" class="muted text-center py-6">No users yet.</td></tr></ng-template>
+            <ng-template #emptymessage><tr><td colspan="14" class="muted text-center py-6">No users yet.</td></tr></ng-template>
           </p-table>
         </div>
         <p class="muted text-xs mt-3">
@@ -138,6 +147,14 @@ const used = (r: TeamReportRow) => r.bills.total > 0 || r.fills > 0 || r.uploads
 export class TeamReportPage implements OnInit {
   private readonly api = inject(ApiService);
   private readonly toast = inject(MessageService);
+  protected readonly auth = inject(AuthService);
+
+  protected readonly units = signal<Unit[]>([]);
+  /** The Main Admin's choice: '' = every unit. A Unit Admin's report is always their unit's (the server decides). */
+  protected readonly unitChoice = signal('');
+  /** The unit the report shown is for (null = every unit). */
+  protected readonly unit = computed(() => this.report()?.unit ?? null);
+  protected readonly unitOptions = computed(() => [{ label: 'All units', value: '' }, ...this.units().map((u) => ({ label: `${u.name} (${u.code})`, value: u.code }))]);
 
   protected readonly presets = PRESETS;
   protected readonly used = used;
@@ -156,6 +173,7 @@ export class TeamReportPage implements OnInit {
       tgnpdcl: sum((r) => r.bills.tgnpdcl),
       pmjay: sum((r) => r.bills.pmjay),
       cil: sum((r) => r.bills.cil),
+      bhel: sum((r) => r.bills.bhel),
       pdfs: sum((r) => r.pdfs),
       pages: sum((r) => r.pages),
       fills: sum((r) => r.fills),
@@ -166,6 +184,16 @@ export class TeamReportPage implements OnInit {
   });
 
   ngOnInit() {
+    this.load();
+    this.api.units().then((u) => this.units.set(u)).catch(() => undefined);
+  }
+
+  protected unitName(code: string | null): string {
+    return this.units().find((u) => u.code === code)?.name ?? code ?? '';
+  }
+
+  chooseUnit(code: string) {
+    this.unitChoice.set(code ?? '');
     this.load();
   }
 
@@ -189,7 +217,7 @@ export class TeamReportPage implements OnInit {
     this.error.set('');
     try {
       // Whole local days: from the first day's midnight to the midnight after the last.
-      this.report.set(await this.api.teamReport(midnight(this.from()).toISOString(), midnight(this.to(), 1).toISOString()));
+      this.report.set(await this.api.teamReport(midnight(this.from()).toISOString(), midnight(this.to(), 1).toISOString(), this.unitChoice()));
     } catch (err) {
       this.report.set(null);
       this.error.set(errorMessage(err));
@@ -199,9 +227,9 @@ export class TeamReportPage implements OnInit {
   exportCsv() {
     const r = this.report();
     if (!r) return;
-    const head = ['Person', 'Username', 'TGNPDCL', 'PM-JAY', 'Coal India', 'Bills', 'PDFs', 'Pages', 'Other PDFs', 'Fills', 'Steps done', 'Failed', 'Last active'];
+    const head = ['Person', 'Username', 'Unit', 'TGNPDCL', 'PM-JAY', 'Coal India', 'BHEL', 'Bills', 'PDFs', 'Pages', 'Other PDFs', 'Fills', 'Steps done', 'Failed', 'Last active'];
     const lines = r.rows.map((u) => [
-      u.fullName, u.username, u.bills.tgnpdcl, u.bills.pmjay, u.bills.cil, u.bills.total, u.pdfs, u.pages, u.uploads,
+      u.fullName, u.username, u.unit ?? '', u.bills.tgnpdcl, u.bills.pmjay, u.bills.cil, u.bills.bhel, u.bills.total, u.pdfs, u.pages, u.uploads,
       u.fills, u.stepsDone, u.stepsFailed, u.lastActive ? new Date(u.lastActive).toLocaleString('en-IN') : 'Never',
     ]);
     const cell = (v: unknown) => `"${String(v).replace(/"/g, '""')}"`;
@@ -209,7 +237,7 @@ export class TeamReportPage implements OnInit {
     const url = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `FillPilot-team-report_${this.from()}_to_${this.to()}.csv`;
+    a.download = `FillPilot-team-report_${r.unit ? `${r.unit}_` : ''}${this.from()}_to_${this.to()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     this.toast.add({ severity: 'success', summary: 'Report exported', detail: a.download });

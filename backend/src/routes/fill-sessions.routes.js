@@ -6,6 +6,8 @@ const express = require('express');
 const db = require('../db');
 const { logAction } = require('../audit-log');
 const { route, httpError, clampInt, UUID_RE } = require('./helpers');
+const { currentUser } = require('../middleware/scope');
+const { scopeOf, canSee, unitFilter } = require('../user-scope');
 
 const router = express.Router();
 
@@ -23,6 +25,7 @@ function toApi(r) {
   return {
     id: r.id,
     user: r.full_name || null,
+    unit: r.unit_code ?? null,
     documentIds: r.document_ids,
     documentNames: r.document_names || [],
     origin: r.origin,
@@ -98,25 +101,26 @@ router.post('/', route(async (req, res) => {
 }));
 
 const LIST_SQL = `
-  SELECT s.*, u.full_name,
+  SELECT s.*, u.full_name, u.unit_code,
          (SELECT array_agg(d.file_name) FROM documents d WHERE d.id = ANY(s.document_ids)) AS document_names
     FROM fill_sessions s JOIN users u ON u.id = s.user_id`;
 
-// GET ?limit= — own sessions; an Admin sees everyone's with ?all=true.
+// GET ?limit= — own sessions. With ?all=true the Main Admin sees everyone's (or one
+// unit's, ?unit=SMJ) and a Unit Admin their unit's; anyone else still only their own.
 router.get('/', route(async (req, res) => {
-  const all = req.user.role === 'Admin' && req.query.all === 'true';
   const limit = clampInt(req.query.limit, 1, 500, 100);
-  const { rows } = await db.query(
-    `${LIST_SQL} ${all ? '' : 'WHERE s.user_id = $1'} ORDER BY s.created_at DESC LIMIT ${limit}`,
-    all ? [] : [req.user.sub],
-  );
+  const scope = req.query.all === 'true' ? scopeOf(await currentUser(req)) : null;
+  const unit = scope ? unitFilter(scope, req.query.unit) : null;
+  const [where, params] = !scope ? ['WHERE s.user_id = $1', [req.user.sub]] : unit ? ['WHERE u.unit_code = $1', [unit]] : ['', []];
+  const { rows } = await db.query(`${LIST_SQL} ${where} ORDER BY s.created_at DESC LIMIT ${limit}`, params);
   res.json(rows.map(toApi));
 }));
 
 router.get('/:id', route(async (req, res) => {
   const { rows } = await db.query(`${LIST_SQL} WHERE s.id = $1`, [Number(req.params.id)]);
   const session = rows[0];
-  if (!session || (session.user_id !== req.user.sub && req.user.role !== 'Admin')) throw httpError(404, 'Session not found');
+  const mine = session && session.user_id === req.user.sub;
+  if (!session || (!mine && !canSee(scopeOf(await currentUser(req)), session))) throw httpError(404, 'Session not found');
   const { rows: fields } = await db.query(
     'SELECT web_field_label, field_key, confidence, source, outcome, message FROM fill_session_fields WHERE session_id = $1 ORDER BY id',
     [session.id],

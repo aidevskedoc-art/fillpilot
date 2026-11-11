@@ -8,12 +8,12 @@
 //           (local-account.ts), the approved sites (config.json) and the
 //           activity log (activity-log.ts) live in the extension itself.
 import type {
-  AllowedSite, CilClaim, DocumentDto, FormatResponse, LoginResponse, MatchResponse, PmjayClaim, SpdclSheet, SpdclTariff, TgnpdclClaim,
-  UploadResponse, User,
+  AllowedSite, BhelClaim, CilClaim, DocumentDto, FormatResponse, LoginResponse, MatchResponse, PmjayClaim, SpdclSheet, SpdclTariff, TgnpdclClaim, TgnpdclPharmacySheet,
+  TgTranscoSheet, TgTranscoTariff, UploadResponse, User,
 } from '../../../web/projects/shared/src/api-types';
 import type { FieldDescriptor, PageInfo } from '../../../web/projects/shared/src/page-contract';
 import { activityLog } from './activity-log';
-import { billSession, cilSession, pmjayAdded, pmjaySession } from './bill-session';
+import { bhelSession, billSession, cilSession, pmjayAdded, pmjaySession } from './bill-session';
 import { FirstLogin, localAccount } from './local-account';
 
 const SESSION_KEY = 'pfa.session';
@@ -195,6 +195,7 @@ class PanelApi {
     await pmjaySession.clear();
     await pmjayAdded.clear();
     await cilSession.clear();
+    await bhelSession.clear();
   }
 
   completedDocuments = async () =>
@@ -255,6 +256,13 @@ class PanelApi {
     return this.call<CilClaim>('POST', '/api/claims/cil', form);
   }
 
+  /** The same bills, read for the BHEL Upload Bill screen (KareXpert): one row per Service Type. Nothing is kept on the server. */
+  readBhelBills(files: File[]): Promise<BhelClaim> {
+    const form = new FormData();
+    files.forEach((f) => form.append('files', f, f.name));
+    return this.call<BhelClaim>('POST', '/api/claims/bhel', form);
+  }
+
   /**
    * The HIS final bill and pharmacy bill Excel files → the SPDCL upload file
    * (base64) and what is in it. admissionDate "dd/mm/yyyy" dates the bill's
@@ -267,6 +275,34 @@ class PanelApi {
     if (options.tariffType) form.append('tariffType', options.tariffType);
     files.forEach((f) => form.append('files', f, f.name));
     return this.call<SpdclSheet>('POST', '/api/claims/spdcl', form);
+  }
+
+  /**
+   * The same two HIS Excel files → TG Transco's bill file (base64) and what is in it.
+   * Dates "dd/mm/yyyy": admission (else the earliest on the bills), discharge and
+   * surgery (not on the bills). Nothing is kept on the server.
+   */
+  makeTgTranscoExcel(files: File[], options: {
+    admissionDate?: string | null; dischargeDate?: string | null; surgeryDate?: string | null; tariffType?: TgTranscoTariff;
+  } = {}): Promise<TgTranscoSheet> {
+    const form = new FormData();
+    // Fields before the files, so the server has them when the files arrive.
+    if (options.admissionDate) form.append('admissionDate', options.admissionDate);
+    if (options.dischargeDate) form.append('dischargeDate', options.dischargeDate);
+    if (options.surgeryDate) form.append('surgeryDate', options.surgeryDate);
+    if (options.tariffType) form.append('tariffType', options.tariffType);
+    files.forEach((f) => form.append('files', f, f.name));
+    return this.call<TgTranscoSheet>('POST', '/api/claims/tgtransco', form);
+  }
+
+  /**
+   * The pharmacy bill alone (its PDF or the HIS Excel) → TGNPDCL's pharmacy upload Excel (base64) and
+   * what is in it — no final bill or website needed. A scanned PDF is read with OCR. Nothing is kept on the server.
+   */
+  makeTgnpdclPharmacyExcel(files: File[]): Promise<TgnpdclPharmacySheet> {
+    const form = new FormData();
+    files.forEach((f) => form.append('files', f, f.name));
+    return this.call<TgnpdclPharmacySheet>('POST', '/api/claims/tgnpdcl-pharmacy', form);
   }
 }
 

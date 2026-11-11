@@ -7,16 +7,23 @@ interface NavItem {
   path: string;
   label: string;
   icon: string;
-  admin?: boolean;
+  /** For the Main Admin and Unit Admins. */
+  manager?: boolean;
 }
 
 const NAV: NavItem[] = [
   { path: '/dashboard', label: 'Dashboard', icon: 'pi pi-home' },
   { path: '/mappings', label: 'Mappings', icon: 'pi pi-sitemap' },
   { path: '/activity', label: 'Activity', icon: 'pi pi-history' },
-  { path: '/team-report', label: 'Team report', icon: 'pi pi-chart-bar', admin: true },
-  { path: '/users', label: 'Users', icon: 'pi pi-users', admin: true },
+  { path: '/team-report', label: 'Team report', icon: 'pi pi-chart-bar', manager: true },
+  { path: '/users', label: 'Users', icon: 'pi pi-users', manager: true },
 ];
+
+/** "Main admin", "Unit admin · SMJ", "User · SMJ". */
+export function roleLabel(role: string | undefined, unit: string | null | undefined): string {
+  const name = role === 'Admin' ? 'Main admin' : role === 'UnitAdmin' ? 'Unit admin' : role ?? '';
+  return unit ? `${name} · ${unit}` : name;
+}
 
 @Component({
   selector: 'app-shell',
@@ -38,7 +45,7 @@ const NAV: NavItem[] = [
         <div class="user">
           <div class="min-w-0">
             <div class="truncate font-medium">{{ auth.user()?.fullName }}</div>
-            <div class="muted text-xs">{{ auth.user()?.role }}</div>
+            <div class="muted text-xs">{{ roleLabel(auth.user()?.role, auth.user()?.unit) }}</div>
           </div>
           <p-button icon="pi pi-sign-out" [text]="true" [rounded]="true" severity="secondary" ariaLabel="Sign out" (onClick)="logout()" />
         </div>
@@ -74,7 +81,8 @@ const NAV: NavItem[] = [
 export class Shell {
   protected readonly auth = inject(AuthService);
   private readonly router = inject(Router);
-  protected readonly nav = computed(() => NAV.filter((n) => !n.admin || this.auth.isAdmin()));
+  protected readonly nav = computed(() => NAV.filter((n) => !n.manager || this.auth.isManager()));
+  protected readonly roleLabel = roleLabel;
 
   async logout() {
     await this.auth.logout();

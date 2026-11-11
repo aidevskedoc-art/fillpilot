@@ -13,6 +13,7 @@ import type { CilClaim } from '../../../web/projects/shared/src/api-types';
 import type { ActionResult, PageIdentity } from '../../../web/projects/shared/src/page-contract';
 import { api, messageOf } from './api';
 import { cilSession } from './bill-session';
+import { BillChecks, ResultLine, useBillPdfs } from './CheckList';
 import { BoltIcon, CheckIcon, ShieldIcon, StopIcon, UploadIcon } from './Icons';
 import { ActiveTab, bridge } from './page-bridge';
 import { CIL_PROBES, buildCilActions, cilAuditLabel } from './cil-plan';
@@ -48,6 +49,8 @@ export function CilView({ tab, onError }: { tab: ActiveTab; onError: (message: s
   /** How many steps this fill runs — fixed at the start, for the progress bar. */
   const [total, setTotal] = useState(0);
   const stopRequested = useRef(false);
+  /** The PDFs just read — a check opens the bill at its page. */
+  const pdfs = useBillPdfs();
 
   useEffect(() => {
     cilSession.load().then(setClaim).catch(() => undefined);
@@ -83,6 +86,7 @@ export function CilView({ tab, onError }: { tab: ActiveTab; onError: (message: s
     try {
       const fresh = await api.readCilBills(files);
       await cilSession.save(fresh);
+      pdfs.hold(files, fresh.documents);
       setClaim(fresh);
       setResults(null);
       setEnded('');
@@ -104,6 +108,7 @@ export function CilView({ tab, onError }: { tab: ActiveTab; onError: (message: s
 
   async function clear() {
     await cilSession.clear().catch(() => undefined);
+    pdfs.release();
     setClaim(null);
     setResults(null);
     setEnded('');
@@ -276,12 +281,7 @@ export function CilView({ tab, onError }: { tab: ActiveTab; onError: (message: s
                 </button>
               )}
             </div>
-            {checksOpen && (
-              <div className="mt-sm">
-                {errors.map((c) => <div key={c.message} className="warn-line bad">✗ {c.message}</div>)}
-                {warnings.map((c) => <div key={c.message} className={`warn-line${c.level === 'info' ? ' muted' : ''}`}>{c.level === 'info' ? 'ℹ' : '⚠'} {c.message}</div>)}
-              </div>
-            )}
+            {checksOpen && <BillChecks checks={claim.checks} pdfs={pdfs} />}
           </div>
         )}
 
@@ -344,11 +344,7 @@ export function CilView({ tab, onError }: { tab: ActiveTab; onError: (message: s
               {results && results.length > 0 && (
                 <details className="preview results" open={failed > 0 || toCheck > 0}>
                   <summary>Result: {results.length - failed} done{toCheck ? ` (${toCheck} to check)` : ''}{failed ? `, ${failed} failed` : ''}</summary>
-                  {results.map((r) => (
-                    <div key={r.index} className={`small ${r.ok ? (r.warn ? 'warn-text' : '') : 'bad'}`}>
-                      {r.ok ? (r.warn ? '⚠' : '✓') : '✗'} {r.label}{r.ok && !r.warn ? '' : ` — ${r.message}`}
-                    </div>
-                  ))}
+                  {results.map((r) => <ResultLine key={r.index} result={r} tabId={tab.tabId} />)}
                 </details>
               )}
               {ended && <div className="warn-line">{ended}</div>}

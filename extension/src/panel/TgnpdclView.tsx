@@ -14,8 +14,10 @@ import type { ActionResult, PageAction, PageIdentity } from '../../../web/projec
 import { activityLog } from './activity-log';
 import { api, messageOf } from './api';
 import { billSession } from './bill-session';
-import { ArrowRightIcon, BoltIcon, CheckIcon, ShieldIcon, StopIcon, UploadIcon } from './Icons';
+import { BillChecks, ResultLine, useBillPdfs } from './CheckList';
+import { ArrowRightIcon, BoltIcon, CheckIcon, DownloadIcon, ShieldIcon, StopIcon, UploadIcon } from './Icons';
 import { ActiveTab, bridge } from './page-bridge';
+import { blobFromBase64, saveFile } from './save-file';
 import { NEXT_ACTION, OUTLINE_PROBES, PlanStep, auditLabel, buildPlan } from './tgnpdcl-plan';
 
 interface StepState {
@@ -28,7 +30,10 @@ interface StepState {
 const KIND: Record<string, string> = {
   'yashoda-final-bill': 'final bill',
   'yashoda-summary-bill': 'summary bill',
+  'yashoda-pharmacy-bill': 'pharmacy bill',
+  'his-pharmacy-excel': 'pharmacy Excel',
 };
+const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
@@ -51,6 +56,8 @@ export function TgnpdclView({ tab, onError }: {
   /** Key of the step that is running, if any. */
   const [busy, setBusy] = useState<string | null>(null);
   const stopRequested = useRef(false);
+  /** The PDFs just read — a check opens the bill at its page. */
+  const pdfs = useBillPdfs();
 
   // A bill loaded earlier in this browser session is still there after the panel was closed.
   useEffect(() => {
@@ -70,11 +77,14 @@ export function TgnpdclView({ tab, onError }: {
   const ipMismatch = Boolean(billIp && pageIp && billIp !== pageIp);
   const canFill = Boolean(claim) && !ipMismatch && (Boolean(pageIp && pageIp === billIp) || confirmed);
 
-  /** Sends the chosen PDFs to be read and keeps the answer for this session — nothing is stored on the server. */
+  /**
+   * Sends the chosen bills to be read and keeps the answer for this session — nothing is stored on the server.
+   * The PDFs, and the pharmacy bill as its PDF or as the HIS Excel.
+   */
   async function read(list: FileList | null) {
-    const files = Array.from(list ?? []).filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+    const files = Array.from(list ?? []).filter((f) => /\.(pdf|xlsx)$/i.test(f.name) || f.type === 'application/pdf');
     if (!files.length) {
-      if (list?.length) setNote('Choose PDF files — the final bill and the summary bill.');
+      if (list?.length) setNote('Choose the bills — the final and summary bill PDFs, and the pharmacy bill (PDF or Excel).');
       return;
     }
     if (reading !== null || busy) return;
@@ -85,6 +95,7 @@ export function TgnpdclView({ tab, onError }: {
     try {
       const fresh = await api.readTgnpdclBills(files);
       await billSession.save(fresh);
+      pdfs.hold(files, fresh.documents);
       setClaim(fresh);
       setSteps({});
       setConfirmed(false);
@@ -92,7 +103,7 @@ export function TgnpdclView({ tab, onError }: {
       const summary = fresh.documents.some((d) => d.docType === 'yashoda-summary-bill');
       setNote([
         ...unread,
-        ...(summary ? [] : ['Only the final bill was read. Choose the final and the summary bill together — "Employee paid" and the hospital bill number come from the summary bill.']),
+        ...(summary ? [] : ['The summary bill was not among them. Choose the final and the summary bill together — "Employee paid" and the hospital bill number come from the summary bill.']),
       ].join(' '));
     } catch (err) {
       onError(messageOf(err));
@@ -107,6 +118,7 @@ export function TgnpdclView({ tab, onError }: {
   /** The bill is entered (or the wrong one was chosen): forget it. */
   async function clear() {
     await billSession.clear().catch(() => undefined);
+    pdfs.release();
     setClaim(null);
     setSteps({});
     setIdentity(null);
@@ -208,6 +220,14 @@ export function TgnpdclView({ tab, onError }: {
       .catch(() => undefined);
   }
 
+  /** The Pharmacy tab's Excel, for the site's own "Upload Excel" — when Fill could not hand it over, or to keep. */
+  function downloadPharmacy() {
+    const file = claim?.tabs.pharmacy.file;
+    if (!file) return;
+    saveFile(blobFromBase64(file.base64, XLSX), file.fileName);
+    setCopied(`${file.fileName} is in your Downloads folder — upload it with the "Upload Excel" button on the site's "3. Pharmacy" tab.`);
+  }
+
   async function copyStructure() {
     try {
       const outline = await bridge.describePage(tab.tabId, OUTLINE_PROBES);
@@ -252,14 +272,14 @@ export function TgnpdclView({ tab, onError }: {
     <>
       <section className="section">
         <div className="label">Bill entry · TGNPDCL</div>
-        <input ref={input} type="file" accept="application/pdf,.pdf" multiple hidden onChange={(e) => read(e.target.files)} />
+        <input ref={input} type="file" accept="application/pdf,.pdf,.xlsx" multiple hidden onChange={(e) => read(e.target.files)} />
 
         {!claim && (
           <button type="button" className={`dropzone${over ? ' over' : ''}`} disabled={isReading} onClick={() => input.current?.click()} {...drop}>
             <span className="drop-icon"><UploadIcon size={18} /></span>
             <span className="strong">{reading !== null ? `Reading the bills… ${clock(reading)}` : 'Drop the bill PDFs here'}</span>
             <span className="muted small">
-              {isReading ? 'Scanned pages are read one by one — usually well under a minute.' : 'Final bill + summary bill, or click to choose them'}
+              {isReading ? 'Scanned pages are read one by one — usually well under a minute.' : 'Final bill + summary bill + pharmacy bill (PDF or Excel), or click to choose them'}
             </span>
           </button>
         )}
@@ -301,12 +321,7 @@ export function TgnpdclView({ tab, onError }: {
                 </button>
               )}
             </div>
-            {checksOpen && (
-              <div className="mt-sm">
-                {errors.map((c) => <div key={c.message} className="warn-line bad">✗ {c.message}</div>)}
-                {warnings.map((c) => <div key={c.message} className={`warn-line${c.level === 'info' ? ' muted' : ''}`}>{c.level === 'info' ? 'ℹ' : '⚠'} {c.message}</div>)}
-              </div>
-            )}
+            {checksOpen && <BillChecks checks={claim.checks} pdfs={pdfs} />}
           </div>
         )}
 
@@ -345,7 +360,7 @@ export function TgnpdclView({ tab, onError }: {
                   {step.preview.length > 0 && (
                     <details className="preview">
                       <summary>{step.preview.length} item(s) to fill</summary>
-                      {step.preview.map((p) => <div key={p} className="small">{p}</div>)}
+                      {step.preview.map((p, i) => <div key={`${i}|${p}`} className="small">{p}</div>)}
                     </details>
                   )}
                   {step.manual.map((m) => <div key={m} className="warn-line">✎ {m}</div>)}
@@ -353,11 +368,7 @@ export function TgnpdclView({ tab, onError }: {
                   {state?.results && (
                     <details className="preview results" open={failed > 0 || toCheck > 0}>
                       <summary>Result: {state.results.length - failed} done{toCheck ? ` (${toCheck} to check)` : ''}{failed ? `, ${failed} failed` : ''}</summary>
-                      {state.results.map((r) => (
-                        <div key={r.index + r.label} className={`small ${r.ok ? (r.warn ? 'warn-text' : '') : 'bad'}`}>
-                          {r.ok ? (r.warn ? '⚠' : '✓') : '✗'} {r.label}{r.ok && !r.warn ? '' : ` — ${r.message}`}
-                        </div>
-                      ))}
+                      {state.results.map((r) => <ResultLine key={r.index + r.label} result={r} tabId={tab.tabId} />)}
                     </details>
                   )}
                   {state?.note && <div className="warn-line">{state.note}</div>}
@@ -370,6 +381,11 @@ export function TgnpdclView({ tab, onError }: {
                     )}
                     {state?.running && step.actions.length > 12 && (
                       <button className="btn btn-danger btn-sm" onClick={() => { stopRequested.current = true; }}><StopIcon size={12} /> Stop</button>
+                    )}
+                    {step.key === 'pharmacy' && claim.tabs.pharmacy.file && (
+                      <button className="btn btn-secondary btn-sm" onClick={downloadPharmacy} title="The site's own pharmacy Excel, for its &quot;Upload Excel&quot; button">
+                        <DownloadIcon size={13} /> Download Excel
+                      </button>
                     )}
                     {step.key !== 'summary' && (
                       <button className="btn btn-secondary btn-sm" disabled={!canFill || Boolean(busy) || isReading} onClick={() => run(step, true)} title="Clicks the site's Next button">

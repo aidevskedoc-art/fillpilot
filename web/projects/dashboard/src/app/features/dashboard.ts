@@ -5,7 +5,7 @@ import { SkeletonModule } from 'primeng/skeleton';
 import type { BillSite, DashboardStats } from '@shared/api-types';
 import { ApiService, errorMessage } from '../core/api.service';
 
-const SITE_NAMES: Record<BillSite, string> = { tgnpdcl: 'TGNPDCL', pmjay: 'PM-JAY', cil: 'Coal India', spdcl: 'SPDCL Excel' };
+const SITE_NAMES: Record<BillSite, string> = { tgnpdcl: 'TGNPDCL', pmjay: 'PM-JAY', cil: 'Coal India', bhel: 'BHEL', spdcl: 'SPDCL Excel', 'tgnpdcl-pharmacy': 'TGNPDCL pharmacy Excel', tgtransco: 'TG Transco Excel' };
 
 @Component({
   selector: 'app-dashboard',
@@ -27,10 +27,11 @@ const SITE_NAMES: Record<BillSite, string> = { tgnpdcl: 'TGNPDCL', pmjay: 'PM-JA
         </div>
       } @else {
         @let s = stats()!;
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
           <div class="card stat"><div class="label">TGNPDCL bills</div><div class="value">{{ s.last30Days.bills.tgnpdcl }}</div></div>
           <div class="card stat"><div class="label">PM-JAY bills</div><div class="value">{{ s.last30Days.bills.pmjay }}</div></div>
           <div class="card stat"><div class="label">Coal India bills</div><div class="value">{{ s.last30Days.bills.cil }}</div></div>
+          <div class="card stat"><div class="label">BHEL bills</div><div class="value">{{ s.last30Days.bills.bhel }}</div></div>
           <div class="card stat">
             <div class="label">PDFs read</div>
             <div class="value text-teal-600">{{ s.last30Days.pdfs }}</div>

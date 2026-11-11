@@ -2,7 +2,7 @@ import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 import type {
-  AllowedSite, AuditLogEntry, DashboardStats, FieldAlias, FillSession, FormMapping, ManagedUser, TeamReport,
+  AllowedSite, AuditLogEntry, DashboardStats, FieldAlias, FillSession, FormMapping, ManagedUser, TeamReport, Unit,
 } from '@shared/api-types';
 
 /** Promise-returning wrappers over the backend API (backend/src/routes). */
@@ -37,13 +37,16 @@ export class ApiService {
   addAlias = (body: { canonicalKey: string; alias: string }) => this.post<FieldAlias>('/api/field-aliases', body);
   deleteAlias = (id: number) => this.delete(`/api/field-aliases/${id}`);
 
-  fillSessions = (all = false) => this.get<FillSession[]>('/api/fill-sessions', all ? { all: 'true' } : {});
+  /** all: everyone the caller manages (the Main Admin: every unit, or `unit`; a Unit Admin: their unit). */
+  fillSessions = (all = false, unit = '') => this.get<FillSession[]>('/api/fill-sessions', all ? { all: 'true', ...(unit ? { unit } : {}) } : {});
   fillSession = (id: number) => this.get<FillSession>(`/api/fill-sessions/${id}`);
   auditLogs = (params: Record<string, string> = {}) => this.get<AuditLogEntry[]>('/api/audit-logs', params);
-  teamReport = (from: string, to: string) => this.get<TeamReport>('/api/reports/team', { from, to });
+  /** unit: the Main Admin's choice ('' = every unit); a Unit Admin always gets their own. */
+  teamReport = (from: string, to: string, unit = '') => this.get<TeamReport>('/api/reports/team', { from, to, ...(unit ? { unit } : {}) });
 
+  units = () => this.get<Unit[]>('/api/units');
   users = () => this.get<ManagedUser[]>('/api/users');
-  createUser = (body: { username: string; fullName: string; password: string; role: string }) => this.post<ManagedUser>('/api/users', body);
+  createUser = (body: { username: string; fullName: string; password: string; role: string; unit?: string | null }) => this.post<ManagedUser>('/api/users', body);
   updateUser = (id: number, body: Record<string, unknown>) => this.patch<ManagedUser>(`/api/users/${id}`, body);
 }
 

@@ -79,14 +79,20 @@ const OWN_CODES = new Set(['YSSH']);
  * a tariff code, CI001 would become C1001. Printed with a digit there (N1003),
  * it stays a tariff code.
  *
- * → { code, tariff: 'NIMS' | 'COMM' | null, raw, valid, own?, alternatives? }
+ * → { code, tariff: 'NIMS' | 'COMM' | null, raw, valid, own?, alternatives?, parts? }
  *   alternatives: other readings where the shape cannot settle I against 1
  *   (78I / 781) — the site's tariff list does.
+ *   parts: the package codes of a line charged under several ("LB092+93+94" →
+ *   LB092, LB093, LB094), see fixPackageCodes.
  */
 function normalizeCode(raw, family = 'package') {
   if (!raw || !raw.trim()) return null;
   const own = raw.replace(/\s+/g, '').toUpperCase();
   if (OWN_CODES.has(own)) return { code: own, tariff: null, raw: raw.trim(), valid: true, own: true };
+  const bhel = bhelCode(own, raw.trim());
+  if (bhel) return bhel;
+  const ehs = ehsCode(own, raw.trim());
+  if (ehs) return ehs;
   // The bills print codes in capitals; a | or ! is OCR's 1 or I (read by place in the fixers below).
   const parts = raw.replace(/\s+/g, '').toUpperCase().split('/').filter(Boolean);
   let tariff = null;
@@ -98,12 +104,53 @@ function normalizeCode(raw, family = 'package') {
     else codeParts.push(part);
   });
   const asPackage = (p) => !tariff && (family !== 'nims' || /^[A-Z]{2}[\dILO|!]{3}$/.test(p));
-  const read = codeParts.map((p) => (asPackage(p) ? { code: fixPackageCode(p), alternatives: [] } : fixTariffCode(p)));
+  const read = codeParts.map((p) => (asPackage(p) ? fixPackageCodes(p) : fixTariffCode(p)));
   const code = read.map((r) => r.code).join('/');
   const alternatives = read.length === 1 ? read[0].alternatives : [];
+  const combined = read.length === 1 ? read[0].parts : null;
   const single = '[A-Z]{0,3}\\d+[A-Z]?';
   const valid = new RegExp(`^${single}(\\+${single})*$`).test(code) || /^[A-Z]\d+(\.\d+)+$/.test(code);
-  return { code, tariff, raw: raw.trim(), valid: Boolean(code) && valid, ...(alternatives.length ? { alternatives } : {}) };
+  return {
+    code, tariff, raw: raw.trim(), valid: Boolean(code) && valid, ...(alternatives.length ? { alternatives } : {}), ...(combined ? { parts: combined } : {}),
+  };
+}
+
+/**
+ * The codes on a BHEL patient's bill (IP 132231, 2026-11-09), in two shapes:
+ *   "E-1530"          an E code
+ *   "3435(1000-30%)"  code 3435 at its base rate ₹1000 less 30% (the bill charges 700);
+ *                     the closing bracket is often cut off by the column ("3462(28500-30%")
+ * compact: the code without spaces, in capitals. Digits are read as digits (OCR's I, L, O).
+ * → normalizeCode's result (with baseRate and discountPct for the second shape), or null for any other code.
+ */
+function bhelCode(compact, raw) {
+  const e = /^E[-–—]([\dILO|!]{1,5})$/.exec(compact);
+  if (e) {
+    const digits = toDigits(e[1]);
+    return { code: `E-${digits}`, tariff: null, raw, valid: /^\d+$/.test(digits) };
+  }
+  const d = /^([\dILO|!]{1,5})\(([\dILO|!,.]+)[-–—]([\dILO|!.]+)%\)?$/.exec(compact);
+  if (!d) return null;
+  const code = toDigits(d[1]);
+  const baseRate = Number(toDigits(d[2]).replace(/,/g, ''));
+  const discountPct = Number(toDigits(d[3]));
+  const valid = /^\d+$/.test(code) && Number.isFinite(baseRate) && Number.isFinite(discountPct);
+  return { code, tariff: null, raw, valid, ...(valid ? { baseRate, discountPct } : {}) };
+}
+
+/**
+ * An EHS procedure code: digits in three or four dotted parts, printed without a
+ * tariff mark — "51.22.6" LAPAROSCOPIC CHOLECYSTECTOMY, in TGNPDCL's EHS Ax-III
+ * list (the client, 2026-11-11; others are in EHS Ax-II). At least two dots, so a
+ * figure such as "350.00" is never taken for one. Digits are read as digits (OCR's
+ * I, L, O); a stray dot at the end is dropped.
+ * → normalizeCode's result with ehs: true, or null for any other code.
+ */
+function ehsCode(compact, raw) {
+  const m = /^([\dILO|!]{1,3}(?:\.[\dILO|!]{1,3}){2,3})\.?$/.exec(compact);
+  if (!m) return null;
+  const code = toDigits(m[1]);
+  return /^\d+(\.\d+)+$/.test(code) ? { code, tariff: null, raw, valid: true, ehs: true } : null;
 }
 
 /** A tariff code, several joined by "+" ("R171+171", "N1003+14A") → { code, alternatives }. */
@@ -160,6 +207,37 @@ function fixPackageCode(read) {
 }
 
 /**
+ * Package codes charged as one line, the later ones printed without the letters
+ * of the code before them (the client, 2026-11-06): "LB092+93+94" is LB092,
+ * LB093 and LB094; "LB120+90+55+58" is LB120, LB090, LB055 and LB058 — the same
+ * bill charges GLUCOSE as LB055 and CREATININE as LB058, so "55" is the digits,
+ * not LB155; "RI029+RI030" is RI029 and RI030; "LB092+RI030+31" ends in RI031.
+ * → { code: as printed (repaired), alternatives, parts?: the codes, only when every one reads as a package code }
+ */
+function fixPackageCodes(part) {
+  if (!part.includes('+')) return { code: fixPackageCode(part), alternatives: [] };
+  const [head, ...rest] = part.split('+');
+  const first = fixPackageCode(head);
+  let letters = /^[A-Z]{2}(?=\d{3}$)/.exec(first)?.[0];
+  const printed = [first];
+  const parts = [first];
+  for (const piece of rest) {
+    const digits = toDigits(piece);
+    if (/^\d{1,3}$/.test(digits)) {
+      printed.push(digits);
+      parts.push(letters ? letters + digits.padStart(3, '0') : null);
+    } else {
+      const code = fixPackageCode(piece);
+      printed.push(code);
+      parts.push(code);
+      if (/^[A-Z]{2}\d{3}$/.test(code)) letters = code.slice(0, 2);
+    }
+  }
+  const whole = parts.every((c) => c && /^[A-Z]{2}\d{3}$/.test(c));
+  return { code: printed.join('+'), alternatives: [], ...(whole ? { parts } : {}) };
+}
+
+/**
  * Which kind of codes a final bill carries: NIMS / COMM-marked tariff codes (a
  * TGNPDCL patient) or unmarked package codes (PM-JAY, Coal India). A code printed
  * without a mark is read the same way as the rest: "N1003" stays N1003 on a NIMS
@@ -188,6 +266,12 @@ function parseQuantity(text) {
 
 const isPunctuationOnly = (text) => /^[\s\-–.,:;'"`_|]*$/.test(text);
 
+/** "1", "2.5", OCR's "I" or "l" for 1 → a quantity; anything else → null. */
+function parseQty(text) {
+  const s = toDigits(text || '').replace(/\s+/g, '');
+  return /^\d+(\.\d+)?$/.test(s) && Number(s) > 0 ? Number(s) : null;
+}
+
 // ------------------------------------------------------------- detection
 
 function detectFormat(allLines) {
@@ -195,6 +279,8 @@ function detectFormat(allLines) {
   if (!/YASHODA/i.test(text)) return null;
   if (/BILL OF SUPPLY/i.test(text) && /INVOICE\s*NO/i.test(text)) return 'yashoda-summary-bill';
   if (/Charged\s+Amount/i.test(text) && /Sub\s*Total/i.test(text)) return 'yashoda-final-bill';
+  // Last, so a final or summary bill is read as before whatever else its PDF holds.
+  if (/PHARMACY\s+DETAILS/i.test(text) && /ITEM\s*ISSUES|TOTAL\s*ISSUE\s*AMOUNT|ITEM\s*DESCRIPTION/i.test(text)) return 'yashoda-pharmacy-bill';
   return null;
 }
 
@@ -247,6 +333,28 @@ function isHeaderLine(text) {
   return /YASHODA\s+HEALTHCARE/i.test(text) || new RegExp(`^${NAME_LABEL}`, 'i').test(text) || (/^Description\b/i.test(text) && /Charged/i.test(text)) || /^Page\s+\d+\s+of\s+\d+$/i.test(text);
 }
 
+/**
+ * A line that starts with a date: "12/10/2026  ACTIVATED PARTIAL" — BHEL bills
+ * date every lab test in front of its name (2026-11-09).
+ */
+const DATED_TEXT = /^([\dIlO|!]{1,2}[/.-][\dIlO|!]{1,2}[/.-][\dIlO|!]{4})\s+(.+)$/;
+const DATE_ONLY = /^[\dIlO|!]{1,2}[/.-][\dIlO|!]{1,2}[/.-][\dIlO|!]{4}$/;
+
+/**
+ * Where a dated line's name starts on a page — right of its date. The name's
+ * second and third lines sit there too, well right of the other items, and
+ * must not be taken for the hospital stamp. null when no line is dated.
+ */
+function datedIndentOf(lines, width) {
+  const xs = [];
+  for (const line of lines) {
+    const desc = line.segments.filter((s) => s.x0 / width < FINAL_COLUMNS.value);
+    if (desc.length >= 2 && DATE_ONLY.test(desc[0].text.trim())) xs.push(desc[1].x0);
+  }
+  xs.sort((a, b) => a - b);
+  return xs.length ? xs[Math.floor(xs.length / 2)] : null;
+}
+
 /** Median x of item descriptions on a page (lines that carry an amount). */
 function itemIndentOf(lines, width) {
   const xs = lines
@@ -268,6 +376,9 @@ function parseFinalBill(pages) {
   let group = null;
   let grandTotal = null;
   let netAmount = null;
+  /** Pages the totals are printed on — a check about them opens the bill there. */
+  let grandTotalPage = null;
+  let netAmountPage = null;
 
   const newGroup = (name) => {
     if (!section) {
@@ -282,6 +393,8 @@ function parseFinalBill(pages) {
   let itemIndent = DEFAULT_ITEM_INDENT;
   for (const { page, width, lines } of pages) {
     itemIndent = itemIndentOf(lines, width) ?? itemIndent;
+    // A dated item's name continues under its first line, right of the date — not the stamp.
+    const stampFrom = Math.max(itemIndent, datedIndentOf(lines, width) ?? 0) + STAMP_INDENT_GAP;
     for (const line of lines) {
       const text = line.text.replace(/\s*\|\s*/g, ' ').trim();
       // "IP No" as OCR reads it too ("1P N0"); the IP number is digits only ("I31885" → 131885).
@@ -294,22 +407,25 @@ function parseFinalBill(pages) {
       if (isHeaderLine(text) || isPunctuationOnly(text) || STAMP_TEXT.test(text)) continue;
 
       const c = columns(line, width);
-      if (!c.amount && c.descX != null && c.descX > itemIndent + STAMP_INDENT_GAP) continue; // stamp / signature
+      if (!c.amount && c.descX != null && c.descX > stampFrom) continue; // stamp / signature
       const pos = page * 100000 + (100000 - line.y * 100); // reading order across pages
 
       if ([c.value, c.desc, c.code].some((t) => /sub\s*total/i.test(t))) {
         if (!group) newGroup(null);
         group.subTotal = parseAmount(c.amount);
         group.subTotalRaw = c.amount || null;
+        group.subTotalPage = page;
         group.closed = true;
         continue;
       }
       if (/grand\s*total/i.test(text)) {
         grandTotal = parseAmount(c.amount);
+        grandTotalPage = page;
         continue;
       }
       if (/^net\b/i.test(c.value) || /^net\s+amount/i.test(text)) {
         netAmount = parseAmount(c.amount);
+        netAmountPage = page;
         continue;
       }
 
@@ -323,7 +439,8 @@ function parseFinalBill(pages) {
       // A sub-group heading only ever follows a section heading or a "Sub Total"
       // — so the second line of a description ("MONITORING)") can't become one.
       const groupOpen = group && !group.closed;
-      if (c.desc && !c.amount && !c.code && !c.value && c.descX != null && c.descX < itemIndent - GROUP_INDENT_GAP && !groupOpen) {
+      // A dated line is an item's first line, never a heading.
+      if (c.desc && !c.amount && !c.code && !c.value && c.descX != null && c.descX < itemIndent - GROUP_INDENT_GAP && !groupOpen && !DATED_TEXT.test(c.desc)) {
         newGroup(c.desc);
         continue;
       }
@@ -375,7 +492,11 @@ function parseFinalBill(pages) {
           }
         }
         const code = normalizeCode(a.code, family);
-        const description = a.parts.sort((x, y) => x.pos - y.pos).map((p) => p.text).join(' ').replace(/\s+/g, ' ').trim();
+        const texts = a.parts.sort((x, y) => x.pos - y.pos).map((p) => p.text);
+        // "12/10/2026 ACTIVATED PARTIAL": the date in front of the name's first line is the item's date.
+        const dated = texts.length ? DATED_TEXT.exec(texts[0]) : null;
+        if (dated) texts[0] = dated[2];
+        const description = texts.join(' ').replace(/\s+/g, ' ').trim();
         const item = {
           description: names ? repairName(description) : description,
           qty: q.qty ?? 1,
@@ -390,41 +511,60 @@ function parseFinalBill(pages) {
           issues: [],
           ...(code?.own ? { ownCode: true } : {}),
           ...(code?.alternatives ? { codeAlternatives: code.alternatives } : {}),
+          // Each code's share of the amount is set once the whole bill is read (shareCombinedCodes).
+          ...(code?.parts ? { codeParts: code.parts.map((c) => ({ code: c, amount: null })) } : {}),
+          ...(dated ? { date: parseDateTime(dated[1])?.date ?? null } : {}),
+          // "3435(1000-30%)": the base rate and the discount the amount comes from.
+          ...(code?.baseRate != null ? { baseRate: code.baseRate, discountPct: code.discountPct } : {}),
         };
         if (qtyNote) item.issues.push(qtyNote);
         if (code && !code.valid) item.issues.push(`Code "${code.raw}" may be misread`);
+        if (item.baseRate != null && item.amount != null) {
+          // Charged to the rupee: 1063 less 30% is 744.10, the bill says 744.00.
+          const discounted = round2(item.baseRate * item.qty * (100 - item.discountPct) / 100);
+          if (Math.abs(discounted - item.amount) > item.qty) {
+            item.issues.push(`${item.baseRate} less ${item.discountPct}% is ${discounted}${item.qty > 1 ? ` for ${item.qty}` : ''}, but the amount reads ${item.amount}`);
+          }
+        }
         if (item.amount == null) item.issues.push(`Amount "${a.amount || ''}" could not be read`);
         if (item.amount != null && item.rate != null && q.qty && !sameAmount(round2(q.qty * item.rate), item.amount)) {
           item.issues.push(`${q.qty} × ${item.rate} = ${round2(q.qty * item.rate)}, but the amount reads ${item.amount}`);
         }
         return item;
       });
+      // A check about the sub total opens the bill where it is printed (else at the group's last line).
+      const page = g.subTotalPage ?? g.items[g.items.length - 1]?.page ?? null;
       delete g.rows;
       delete g.closed;
-      reconcileGroup(s, g, issues);
+      delete g.subTotalPage;
+      reconcileGroup(s, g, issues, page);
       computedTotal += g.subTotal ?? sum(g.items.map((i) => i.amount));
     }
   }
   computedTotal = round2(computedTotal);
+  shareCombinedCodes(sections.flatMap((s) => s.groups.flatMap((g) => g.items)));
 
+  const firstPage = pages[0]?.page ?? null;
+  const lastPage = pages[pages.length - 1]?.page ?? null;
+  grandTotalPage ??= lastPage;
   if (grandTotal == null) {
-    issues.push({ level: 'info', message: `Grand total not readable — using the sum of the sections, ${computedTotal.toFixed(2)}` });
+    issues.push({ level: 'info', message: `Grand total not readable — using the sum of the sections, ${computedTotal.toFixed(2)}`, page: grandTotalPage });
     grandTotal = computedTotal;
   } else if (!sameAmount(grandTotal, computedTotal)) {
     const gap = round2(grandTotal - computedTotal);
     // 4,01,645.90 read as 645.90: OCR dropped the leading digits, so the gap is a round number.
     const hint = gap > 0 && gap % 1000 === 0 ? ` — the difference ${gap.toFixed(2)} is a round number: a large amount probably lost its first digits in reading` : '';
-    issues.push({ level: 'error', message: `Sections add up to ${computedTotal.toFixed(2)} but the grand total reads ${grandTotal.toFixed(2)}${hint}` });
+    issues.push({ level: 'error', message: `Sections add up to ${computedTotal.toFixed(2)} but the grand total reads ${grandTotal.toFixed(2)}${hint}`, page: grandTotalPage });
   }
   if (netAmount != null && Math.abs(Math.round(grandTotal) - netAmount) > 1) {
-    issues.push({ level: 'error', message: `Net amount ${netAmount.toFixed(2)} does not match the grand total ${grandTotal.toFixed(2)}` });
+    issues.push({ level: 'error', message: `Net amount ${netAmount.toFixed(2)} does not match the grand total ${grandTotal.toFixed(2)}`, page: netAmountPage ?? grandTotalPage });
   }
-  if (!patient.ipNo) issues.push({ level: 'error', message: 'IP number not found on the bill' });
+  if (!patient.ipNo) issues.push({ level: 'error', message: 'IP number not found on the bill', page: firstPage });
 
   for (const s of sections) {
     for (const g of s.groups) {
       for (const it of g.items) {
-        for (const message of it.issues) issues.push({ level: 'warning', message: `${it.description || g.name}: ${message}` });
+        for (const message of it.issues) issues.push({ level: 'warning', message: `${it.description || g.name}: ${message}`, page: it.page });
       }
     }
   }
@@ -440,23 +580,72 @@ function parseFinalBill(pages) {
     sections,
     doctors,
     totals: { computed: computedTotal, grandTotal, netAmount },
+    grandTotalPage,
     issues,
   };
 }
 
 /**
+ * A line charged under several package codes (ELECTROLYTES "LB092+93+94",
+ * 390.00) is a service for each code, so its amount is shared out at the rate
+ * the same bill charges each code on a line of its own (SODIUM LB092 120,
+ * POTASSIUM LB093 120, CHLORIDES LB094 150). One code never charged alone takes
+ * what is left. Where the bill cannot settle it — two such codes, or rates that
+ * do not add up — the amount is shared equally and those parts carry a note:
+ * a payer site that prices the code shows the difference.
+ */
+function shareCombinedCodes(items) {
+  const rates = new Map();
+  for (const it of items) {
+    if (it.codeParts || !it.code || it.amount == null) continue;
+    const rate = it.rate ?? round2(it.amount / (it.qty || 1));
+    // A code charged at different rates on this bill has no one rate to go by.
+    rates.set(it.code, rates.has(it.code) && rates.get(it.code) !== rate ? null : rate);
+  }
+  for (const it of items) {
+    if (!it.codeParts || it.amount == null) continue;
+    const qty = it.qty || 1;
+    const each = round2(it.amount / qty);
+    const known = it.codeParts.map((p) => rates.get(p.code) ?? null);
+    const open = it.codeParts.filter((p, i) => known[i] == null);
+    const rest = round2(each - sum(known));
+    let shares;
+    let unsure = [];
+    let note = null;
+    if (open.length ? rest > 0 : sameAmount(rest, 0)) {
+      shares = known.map((r) => r ?? round2(rest / open.length));
+      if (open.length > 1) {
+        unsure = open;
+        note = `The bill does not show how ${rest.toFixed(2)} of ${it.code} divides between ${open.map((p) => p.code).join(' and ')} — shared equally, check the site's amount`;
+      }
+    } else {
+      shares = known.map(() => round2(each / known.length));
+      unsure = it.codeParts;
+      note = `The bill's own rates for ${it.codeParts.map((p) => p.code).join(', ')} do not add up to ${it.code}'s ${each.toFixed(2)} — shared equally, check the site's amount`;
+    }
+    // The last part takes the paise left by rounding, so the parts add up to the line.
+    let left = it.amount;
+    it.codeParts.forEach((p, i) => {
+      p.amount = i === it.codeParts.length - 1 ? round2(left) : round2(shares[i] * qty);
+      left -= p.amount;
+      if (unsure.includes(p)) p.note = note;
+    });
+  }
+}
+
+/**
  * Items vs. "Sub Total...". When exactly one figure is unreadable it is
  * derived from the others (marked corrected); a disagreement between readable
- * figures is reported, never silently "fixed".
+ * figures is reported, never silently "fixed". page: where the sub total is printed.
  */
-function reconcileGroup(section, g, issues) {
+function reconcileGroup(section, g, issues, page = null) {
   const where = g.name || section.name;
   const known = g.items.filter((i) => i.amount != null);
   const missing = g.items.filter((i) => i.amount == null);
   const itemsSum = sum(known.map((i) => i.amount));
 
   if (g.subTotal == null && missing.length === 0) {
-    if (g.subTotalRaw) issues.push({ level: 'info', message: `${where}: sub total "${g.subTotalRaw}" unreadable — using the items' sum ${itemsSum.toFixed(2)}` });
+    if (g.subTotalRaw) issues.push({ level: 'info', message: `${where}: sub total "${g.subTotalRaw}" unreadable — using the items' sum ${itemsSum.toFixed(2)}`, page });
     g.subTotal = itemsSum;
     return;
   }
@@ -488,15 +677,15 @@ function reconcileGroup(section, g, issues) {
     const digits = (s) => (String(s).match(/\d/g) || []).length;
     const verified = g.items.length > 0 && g.items.every((i) => i.rate != null && sameAmount(round2(i.qty * i.rate), i.amount));
     if (digits(g.subTotalRaw) < digits(itemsSum.toFixed(2)) || verified) {
-      issues.push({ level: 'info', message: `${where}: sub total read as "${g.subTotalRaw}" — using the items' sum ${itemsSum.toFixed(2)}` });
+      issues.push({ level: 'info', message: `${where}: sub total read as "${g.subTotalRaw}" — using the items' sum ${itemsSum.toFixed(2)}`, page });
       g.subTotal = itemsSum;
       return;
     }
-    issues.push({ level: 'error', message: `${where}: items add up to ${itemsSum.toFixed(2)} but the sub total reads ${g.subTotal.toFixed(2)}` });
+    issues.push({ level: 'error', message: `${where}: items add up to ${itemsSum.toFixed(2)} but the sub total reads ${g.subTotal.toFixed(2)}`, page });
     return;
   }
   if (missing.length > 1) {
-    issues.push({ level: 'error', message: `${where}: ${missing.length} amounts could not be read` });
+    issues.push({ level: 'error', message: `${where}: ${missing.length} amounts could not be read`, page: missing[0].page ?? page });
   }
 }
 
@@ -558,8 +747,10 @@ function parseSummaryBill(pagesIn) {
   /** A bill the company pays in full prints no "PAID AMOUNT" line at all (Coal India). */
   let paidPrinted = false;
   let prevFirst = '';
+  /** Where the totals are printed — a check about them opens the bill there. */
+  let totalsPage = null;
 
-  for (const { width, lines } of pages) {
+  for (const { page, width, lines } of pages) {
     for (const line of lines) {
       const text = line.text.replace(/\s*\|\s*/g, '  ').trim();
       const first = line.segments[0];
@@ -605,6 +796,7 @@ function parseSummaryBill(pagesIn) {
       // First "TOTAL AMOUNT" is the exact sum (paise), the second the rounded bill amount.
       if (/TOTAL\s+AMOUNT/i.test(text)) {
         inCharges = false;
+        totalsPage ??= page;
         totalAmountLines += 1;
         if (totalAmountLines === 1) totals.gross = amount;
         else totals.rounded = amount;
@@ -627,60 +819,299 @@ function parseSummaryBill(pagesIn) {
         if (/^AMOUNT$/i.test(label) || /^SAC/i.test(label)) continue;
         // An unreadable amount leaves fragments behind ("HAEMATOLOGY 14 O" for 6,144.00).
         const name = (amount == null ? label.replace(/(\s+[\dIlOo,.']+)+$/, '') : label).replace(/\s+/g, ' ');
-        categories.push({ name, amount, amountRaw: last.text });
+        categories.push({ name, amount, amountRaw: last.text, page });
       }
     }
   }
+  const firstPage = pages[0]?.page ?? null;
+  totalsPage ??= pages[pages.length - 1]?.page ?? null;
 
   // One unreadable charge is derived from the total (and the other way round);
-  // likewise credit + paid = total.
+  // likewise credit + paid = total. Several unreadable charges share what the
+  // total leaves for them — said once, with that amount, so the gap is not
+  // reported again as a wrong total; a claim builder can confirm them from the
+  // final bill (unreadableCharges).
   const unreadable = categories.filter((c) => c.amount == null);
+  let unreadableCharges = null;
   if (unreadable.length === 1 && totals.gross != null) {
     const c = unreadable[0];
     c.amount = round2(totals.gross - sum(categories.filter((x) => x !== c).map((x) => x.amount)));
     c.corrected = true;
-    issues.push({ level: 'info', message: `${c.name}: amount unreadable — derived from the total: ${c.amount.toFixed(2)}` });
+    issues.push({ level: 'info', message: `${c.name}: amount unreadable — derived from the total: ${c.amount.toFixed(2)}`, page: c.page });
   } else {
-    for (const c of unreadable) issues.push({ level: 'warning', message: `${c.name}: amount "${c.amountRaw}" could not be read` });
+    const rest = totals.gross != null ? round2(totals.gross - sum(categories.filter((x) => x.amount != null).map((x) => x.amount))) : null;
+    if (unreadable.length > 1 && rest != null && rest > 0) {
+      unreadableCharges = { names: unreadable.map((c) => c.name), amount: rest };
+      issues.push({
+        level: 'warning',
+        code: 'unreadable-charges',
+        message: `${unreadable.map((c) => c.name).join(', ')}: amounts could not be read ("${unreadable.map((c) => c.amountRaw).join('", "')}") — together they are ${rest.toFixed(2)}, what the total amount leaves for them`,
+        page: unreadable[0].page,
+      });
+    } else {
+      for (const c of unreadable) issues.push({ level: 'warning', message: `${c.name}: amount "${c.amountRaw}" could not be read`, page: c.page });
+    }
   }
   const credit = totals.credit?.amount ?? null;
   if (totals.paid == null && credit != null && totals.total != null) {
     totals.paid = round2(totals.total - credit);
     // Not printed and nothing left to pay: the company pays the whole bill — nothing to report.
-    if (paidPrinted) issues.push({ level: 'info', message: `Paid amount unreadable — derived as total − credit: ${totals.paid.toFixed(2)}` });
-    else if (totals.paid !== 0) issues.push({ level: 'info', message: `No paid amount on the bill — worked out as total − credit: ${totals.paid.toFixed(2)}` });
+    if (paidPrinted) issues.push({ level: 'info', message: `Paid amount unreadable — derived as total − credit: ${totals.paid.toFixed(2)}`, page: totalsPage });
+    else if (totals.paid !== 0) issues.push({ level: 'info', message: `No paid amount on the bill — worked out as total − credit: ${totals.paid.toFixed(2)}`, page: totalsPage });
   } else if (totals.total == null && credit != null && totals.paid != null) {
     totals.total = round2(credit + totals.paid);
   } else if (credit == null && totals.credit && totals.total != null && totals.paid != null) {
     totals.credit.amount = round2(totals.total - totals.paid);
-    issues.push({ level: 'info', message: `Credit amount unreadable — derived as total − paid: ${totals.credit.amount.toFixed(2)}` });
+    issues.push({ level: 'info', message: `Credit amount unreadable — derived as total − paid: ${totals.credit.amount.toFixed(2)}`, page: totalsPage });
   }
   const categoriesSum = sum(categories.map((c) => c.amount));
   if (totals.gross == null) {
     totals.gross = categoriesSum;
-    issues.push({ level: 'info', message: `Total amount not readable — using the sum of the charges, ${categoriesSum.toFixed(2)}` });
-  } else if (!sameAmount(totals.gross, categoriesSum)) {
-    issues.push({ level: 'error', message: `Charges add up to ${categoriesSum.toFixed(2)} but the total amount reads ${totals.gross.toFixed(2)}` });
+    issues.push({ level: 'info', message: `Total amount not readable — using the sum of the charges, ${categoriesSum.toFixed(2)}`, page: totalsPage });
+  } else if (!unreadableCharges && !sameAmount(totals.gross, categoriesSum)) {
+    issues.push({ level: 'error', message: `Charges add up to ${categoriesSum.toFixed(2)} but the total amount reads ${totals.gross.toFixed(2)}`, page: totalsPage });
   }
   if (totals.rounded != null && Math.abs(Math.round(totals.gross) - totals.rounded) > 1) {
-    issues.push({ level: 'error', message: `Rounded total ${totals.rounded.toFixed(2)} does not match ${totals.gross.toFixed(2)}` });
+    issues.push({ level: 'error', message: `Rounded total ${totals.rounded.toFixed(2)} does not match ${totals.gross.toFixed(2)}`, page: totalsPage });
   }
   if (totals.total != null && totals.credit?.amount != null && totals.paid != null && !sameAmount(totals.credit.amount + totals.paid, totals.total)) {
-    issues.push({ level: 'error', message: `Credit ${totals.credit.amount} + paid ${totals.paid} ≠ total ${totals.total}` });
+    issues.push({ level: 'error', message: `Credit ${totals.credit.amount} + paid ${totals.paid} ≠ total ${totals.total}`, page: totalsPage });
   }
-  if (!patient.ipNo) issues.push({ level: 'error', message: 'IP number not found on the bill' });
-  if (!invoiceNo) issues.push({ level: 'warning', message: 'Invoice number not found' });
+  if (!patient.ipNo) issues.push({ level: 'error', message: 'IP number not found on the bill', page: firstPage });
+  if (!invoiceNo) issues.push({ level: 'warning', message: 'Invoice number not found', page: firstPage });
 
-  return { format: 'yashoda-summary-bill', invoiceNo, patient, categories, totals, issues };
+  return { format: 'yashoda-summary-bill', invoiceNo, patient, categories, totals, issues, ...(unreadableCharges ? { unreadableCharges } : {}) };
+}
+
+// --------------------------------------------------------- pharmacy bill
+
+/** "65816 09/10/2026": an indent's number and date, on a line of their own. */
+const INDENT_LINE = /^([\dIlO|!]{3,})\s+([\dIlO|!]{1,2}[/.-][\dIlO|!]{1,2}[/.-][\dIlO|!]{4})$/;
+const PHARMACY_HEADER = /PHARMACY\s+DETAILS|ITEM\s*DESCRIPTION|C\s*\/\s*F\s*TOTAL|PAGE\s*TOTAL|AUTHORI[SZ]ED\s*SIGNATORY/i;
+/** A line of column headings only — the header's second line ("No", "Description  Date"). */
+const HEADING_WORDS = /^(INDENT|NO\.?|DATE|ITEM|DESCRIPTION|BATCH|EXPIRY|QTY|PRICE|VALUE|C\s*\/\s*F|TOTAL|\s)+$/i;
+
+/**
+ * The pharmacy bill comes in two layouts: a narrow one (IP 131537: Indent No |
+ * Date | Item Description | Qty | Value | C/F Total) and a wide one with Batch
+ * No, Expiry Date and Price too (IP 132231, 2026-11-09). There the item, batch
+ * and expiry sit closer than a column break (lines.js), so each line is read
+ * word by word against its page's own header row: a number belongs to the
+ * heading nearest its middle (numbers are right-aligned under it), and the
+ * item's name is what lies left of the batch column (or of Qty). Places are
+ * shares of the page width. Until a header row is read: the narrow layout's.
+ */
+const NARROW_LAYOUT = { bands: [['qty', 0.52], ['value', 0.63], ['carried', 0.8]], batchFrom: null };
+
+/** A line's words; a segment without them (built by hand) is one word. */
+const wordsOf = (line) => line.segments.flatMap((s) => s.words ?? [{ text: s.text, x0: s.x0, x1: s.x1 }]);
+const middleOf = (w) => (w.x0 + w.x1) / 2;
+
+/** The header row → { bands: [[column, from]], batchFrom } as shares of the width; null for any other line. */
+function pharmacyLayout(line, width) {
+  const words = wordsOf(line);
+  const find = (re) => words.find((w) => re.test(w.text));
+  const qty = find(/^qty$/i);
+  const value = find(/^value$/i);
+  if (!qty || !value) return null;
+  const batch = find(/^batch/i);
+  const expiry = find(/^expiry/i);
+  const numeric = [['qty', qty], ['price', find(/^price$/i)], ['value', value], ['carried', find(/^c\s*\/\s*f/i)]].filter(([, w]) => w);
+  const bands = numeric.map(([name, w], i) => {
+    const before = i ? numeric[i - 1][1] : expiry ?? batch;
+    // Half-way from the column before; left of Qty in the narrow layout, a little left of its heading.
+    return [name, (before ? (middleOf(before) + middleOf(w)) / 2 : middleOf(w) - 0.06 * width) / width];
+  });
+  // Batch numbers start a little left of their heading (it is centred over them).
+  return { bands, batchFrom: batch ? (batch.x0 - 0.035 * width) / width : null };
+}
+
+/** One line's words by column, as text: the item's name, Qty, Price, Value and the C/F (indent) total. */
+function pharmacyColumns(line, layout, width) {
+  const cols = { desc: [], qty: [], price: [], value: [], carried: [] };
+  for (const w of wordsOf(line)) {
+    const at = middleOf(w) / width;
+    const band = [...layout.bands].reverse().find(([, from]) => at >= from);
+    if (band) cols[band[0]].push(w.text);
+    // Batch and expiry are not needed — kept out of the item's name.
+    else if (layout.batchFrom == null || w.x0 / width < layout.batchFrom) cols.desc.push(w.text);
+  }
+  const text = (list) => list.join(' ').replace(/\s+/g, ' ').trim();
+  return { desc: text(cols.desc), qty: text(cols.qty), price: text(cols.price), value: text(cols.value), carried: text(cols.carried) };
+}
+
+/**
+ * pages: [{ page, width, lines }] → the pharmacy bill: the medicines and
+ * consumables issued (and returned) to the patient, indent by indent.
+ *   items: [{ date (yyyy-mm-dd), indentNo, description, qty, price, value, returned, page, issues }]
+ * price: as printed in the wide layout, else null (Value is qty × price). Item
+ * descriptions wrap over lines centred on the Qty / Value line, as on the
+ * final bill. The items are checked against TOTAL ISSUE AMOUNT and TOTAL
+ * RETURN AMOUNT (printed on the line below their label in the wide layout),
+ * and those against NET AMOUNT, which is rounded to the rupee.
+ */
+function parsePharmacyBill(pages) {
+  const issues = [];
+  const patient = {};
+  const anchors = [];
+  const texts = [];
+  let returned = false;
+  /** Lines of one indent belong together: a description never joins another indent's item. */
+  let block = 0;
+  let indent = { no: null, date: null };
+  const totals = { issued: null, returned: null, net: null };
+  /** A total whose amount is on the next line ("TOTAL ISSUE AMOUNT:" over "8,16,992.70"). */
+  let pending = null;
+  let totalsPage = null;
+  let layout = NARROW_LAYOUT;
+
+  for (const { page, width, lines } of pages) {
+    for (const line of lines) {
+      const text = line.text.replace(/\s*\|\s*/g, ' ').trim();
+      const nameMatch = new RegExp(`^${NAME_LABEL}\\s*(.+?)\\s+[I1l|]P\\s*N[o0]\\s*[:.;]?\\s*([\\dIlLO|!]+)`, 'i').exec(text);
+      if (nameMatch) {
+        patient.name ||= repairName(nameMatch[1].trim());
+        patient.ipNo ||= repairNumber(nameMatch[2]);
+        continue;
+      }
+      const header = pharmacyLayout(line, width);
+      if (header) {
+        layout = header;
+        continue;
+      }
+      if (isHeaderLine(text) || PHARMACY_HEADER.test(text) || HEADING_WORDS.test(text) || isPunctuationOnly(text) || STAMP_TEXT.test(text)) continue;
+
+      let m;
+      const total = /TOTAL\s*ISSUE\s*AMOUNT/i.test(text) ? 'issued' : /TOTAL\s*RETURN\s*AMOUNT/i.test(text) ? 'returned' : /NET\s*AMOUNT/i.test(text) ? 'net' : null;
+      if (total) {
+        // Returns print as negative amounts; parseAmount reads the figure without the sign.
+        const amount = parseAmount(text.replace(/^.*AMOUNT\s*[:;.]?/i, ''));
+        if (amount == null) pending = total;
+        else totals[total] = amount;
+        totalsPage ??= page;
+        continue;
+      }
+      if (pending) {
+        const amount = parseAmount(text);
+        const was = pending;
+        pending = null;
+        if (amount != null) {
+          totals[was] = amount;
+          continue;
+        }
+      }
+      if (/ISSUES?\s*>{2,}/i.test(text)) {
+        returned = false;
+        block++;
+        continue;
+      }
+      if (/RETURNS?\s*>{2,}|>{2,}.*RETURN/i.test(text)) {
+        returned = true;
+        block++;
+        continue;
+      }
+      if ((m = INDENT_LINE.exec(text))) {
+        indent = { no: repairNumber(m[1]), date: parseDateTime(m[2])?.date ?? null };
+        block++;
+        continue;
+      }
+
+      const c = pharmacyColumns(line, layout, width);
+      const pos = page * 100000 + (100000 - line.y * 100); // reading order across pages
+      // An amount alone in the C/F Total column is the indent's running total.
+      if (!c.qty && !c.price && !c.value) {
+        if (c.desc) texts.push({ pos, block, text: c.desc });
+        continue;
+      }
+      anchors.push({ pos, page, block, indent, returned, qtyRaw: c.qty, priceRaw: c.price, valueRaw: c.value, parts: c.desc ? [{ pos, text: c.desc }] : [] });
+    }
+  }
+
+  for (const t of texts) {
+    const own = anchors.filter((a) => a.block === t.block);
+    if (!own.length) continue;
+    own.reduce((best, a) => (Math.abs(a.pos - t.pos) < Math.abs(best.pos - t.pos) ? a : best)).parts.push({ pos: t.pos, text: t.text });
+  }
+
+  const items = anchors.map((a) => {
+    const item = {
+      date: a.indent.date,
+      indentNo: a.indent.no,
+      description: a.parts.sort((x, y) => x.pos - y.pos).map((p) => p.text).join(' ').replace(/\s+/g, ' ').trim(),
+      qty: parseQty(a.qtyRaw),
+      price: a.priceRaw ? parseAmount(a.priceRaw) : null,
+      value: parseAmount(a.valueRaw),
+      returned: a.returned,
+      page: a.page,
+      issues: [],
+    };
+    if (!item.description) item.issues.push('No item name could be read');
+    if (item.qty == null) {
+      item.issues.push(`Qty "${a.qtyRaw}" could not be read — entered as 1 at the full value; check it`);
+      item.qty = 1;
+      item.price = null;
+    }
+    if (item.value == null && item.price != null) {
+      item.value = round2(item.price * item.qty);
+      item.issues.push(`Value "${a.valueRaw}" could not be read — worked out as Price × Qty = ${item.value.toFixed(2)}`);
+    } else if (item.value == null) item.issues.push(`Value "${a.valueRaw}" could not be read`);
+    else if (item.price != null && Math.abs(item.price * item.qty - item.value) > 0.05) {
+      item.issues.push(`Price ${item.price} × Qty ${item.qty} is not the Value ${item.value} — one of them is misread`);
+      item.price = null;
+    }
+    if (!item.date) item.issues.push('No indent date above this item');
+    return item;
+  });
+
+  // One unreadable value among the issues (or the returns) is what their printed total leaves.
+  const reconcile = (list, printed, what) => {
+    const missing = list.filter((i) => i.value == null);
+    const known = sum(list.filter((i) => i.value != null).map((i) => i.value));
+    if (printed == null) {
+      if (list.length) issues.push({ level: 'warning', message: `${what} not readable — the items add up to ${known.toFixed(2)}`, page: totalsPage });
+      return;
+    }
+    if (missing.length === 1) {
+      const item = missing[0];
+      item.value = round2(printed - known);
+      item.issues = item.issues.filter((m) => !/could not be read/.test(m) || /^Qty/.test(m));
+      item.issues.push(`Value derived from the ${what}: ${item.value.toFixed(2)}`);
+    } else if (missing.length > 1) {
+      issues.push({ level: 'error', message: `${missing.length} item values could not be read`, page: missing[0].page });
+    } else if (!sameAmount(known, printed)) {
+      issues.push({ level: 'error', message: `Items add up to ${known.toFixed(2)} but the ${what} reads ${printed.toFixed(2)}`, page: totalsPage });
+    }
+  };
+  reconcile(items.filter((i) => !i.returned), totals.issued, 'TOTAL ISSUE AMOUNT');
+  if (items.some((i) => i.returned) || totals.returned != null) reconcile(items.filter((i) => i.returned), totals.returned, 'TOTAL RETURN AMOUNT');
+
+  const issued = totals.issued ?? sum(items.filter((i) => !i.returned).map((i) => i.value));
+  const back = totals.returned ?? sum(items.filter((i) => i.returned).map((i) => i.value));
+  const due = round2(issued - back);
+  if (totals.net == null) {
+    totals.net = due;
+    issues.push({ level: 'info', message: `NET AMOUNT not readable — using issues − returns, ${due.toFixed(2)}`, page: totalsPage });
+  } else if (Math.abs(totals.net - due) > 1) {
+    // NET AMOUNT is rounded to the rupee (8,13,246.00 for 8,13,245.61): only more than that is a difference.
+    issues.push({ level: 'error', message: `NET AMOUNT reads ${totals.net.toFixed(2)} but issues − returns = ${due.toFixed(2)}`, page: totalsPage });
+  }
+  if (!items.length) issues.push({ level: 'error', message: 'No items found on the pharmacy bill', page: pages[0]?.page ?? null });
+  if (!patient.ipNo) issues.push({ level: 'error', message: 'IP number not found on the bill', page: pages[0]?.page ?? null });
+  for (const it of items) {
+    for (const message of it.issues) issues.push({ level: 'warning', message: `${it.description || 'Item'}: ${message}`, page: it.page });
+  }
+
+  return { format: 'yashoda-pharmacy-bill', patient, items, totals, issues };
 }
 
 function parseStructured(format, pages) {
   if (format === 'yashoda-final-bill') return parseFinalBill(pages);
   if (format === 'yashoda-summary-bill') return parseSummaryBill(pages);
+  if (format === 'yashoda-pharmacy-bill') return parsePharmacyBill(pages);
   return null;
 }
 
 module.exports = {
-  detectFormat, parseStructured, parseFinalBill, parseSummaryBill, parseAmount, normalizeCode, codeFamily, parseQuantity,
+  detectFormat, parseStructured, parseFinalBill, parseSummaryBill, parsePharmacyBill, parseAmount, normalizeCode, codeFamily, parseQuantity,
   repairInvoiceNo, repairNumber, repairName,
 };

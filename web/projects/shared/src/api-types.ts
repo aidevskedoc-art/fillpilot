@@ -3,11 +3,22 @@
 
 export type DocumentStatus = 'uploaded' | 'processing' | 'extracting' | 'validating' | 'completed' | 'failed';
 
+/** Admin = the Main Admin (every unit); UnitAdmin manages one unit; User their own work. */
+export type Role = 'Admin' | 'UnitAdmin' | 'User';
+
 export interface User {
   id: number;
   username: string;
   fullName: string;
-  role: 'Admin' | 'User';
+  role: Role;
+  /** The hospital unit's code (HTC, SMJ, SEC, MLK); null for the Main Admin or a user not yet given one. */
+  unit?: string | null;
+}
+
+/** GET /api/units — the hospital's units. */
+export interface Unit {
+  code: string;
+  name: string;
 }
 
 export interface LoginResponse {
@@ -37,9 +48,32 @@ export interface DocumentDto {
   fileKept: boolean;
 }
 
+/** Where on the bill a check is about: which PDF, and its page (1 = first; null = the bill as a whole). */
+export interface BillPlace {
+  doc: 'final' | 'summary' | 'pharmacy';
+  page: number | null;
+}
+
+/** One row of the TGNPDCL Pharmacy tab: an item issued (returns taken off), as the site's upload Excel has it. */
+export interface TgnpdclPharmacyRow {
+  /** yyyy-mm-dd: the indent's date. */
+  date: string | null;
+  name: string;
+  /** Amount per item = the bill's Value ÷ Qty, to the paisa. */
+  rate: number;
+  qty: number;
+  amount: number;
+  /** ₹2,000 or more each: its physical pouches go with the original bill (the site's rule). */
+  pouch: boolean;
+  /** Page of the pharmacy bill PDF it is on (null from the Excel). */
+  page: number | null;
+}
+
 export interface ClaimCheck {
   level: 'error' | 'warning' | 'info';
   message: string;
+  /** Where on the bill — the panel opens that PDF there when the check is clicked. */
+  at?: BillPlace;
 }
 
 /**
@@ -72,7 +106,17 @@ export interface TgnpdclClaim {
       /** The hospital's own codes (YSSH): in no tariff list — entered on the site as non-tariff items. Identical lines are one row. */
       ownItems?: { code: string; description: string; qty: number; rate: number | null; amountClaimed: number; lines: number; notes: string[] }[];
     };
-    pharmacy: { total: number | null; rows: unknown[]; note: string | null };
+    /**
+     * total: the final bill's PHARMACY amount. rows: from the pharmacy bill (PDF or the HIS Excel), when one
+     * was chosen; file: those rows as the site's own upload Excel (base64), which "Fill" gives to the tab.
+     */
+    pharmacy: {
+      total: number | null;
+      rows: TgnpdclPharmacyRow[];
+      note: string | null;
+      bill: { issued: number | null; returned: number | null; net: number | null; source: 'pdf' | 'excel' } | null;
+      file?: { fileName: string; base64: string };
+    };
     summary: { employeePaid: number | null; concession: number; hospitalBillNumber: string | null };
   };
   totals: { billTotal: number; netAmount: number | null; filledByExtension: number; leftForManualEntry: number };
@@ -135,6 +179,61 @@ export interface CilClaim {
   checks: ClaimCheck[];
 }
 
+/** One Bill Details row of the BHEL Upload Bill screen (backend/src/claims/bhel.js): a Service Type and the bill's total for it. */
+export interface BhelRow {
+  /** As the site's Service Type list writes it ("Pathology BHEL"). */
+  serviceType: string;
+  /** The fixed text the client types for this type ("LAB INVESTIGATIONS"). */
+  remarks: string;
+  qty: number;
+  /** Whole rupees, as typed in Amount. */
+  amount: number;
+  /** The bill's exact total for the sections in this row. */
+  billAmount: number;
+  /** The bill's sections in this row ("LABORATORY / HAEMATOLOGY"). */
+  sections: string[];
+  /** One of several rows of its Service Type (Other Unlisted Item): told apart from the others by Remarks. */
+  byRemarks?: boolean;
+}
+
+/**
+ * POST /api/claims/bhel (the bill PDFs, multipart) — the BHEL claim's Upload Bill screen on KareXpert:
+ * Patient Details and one Bill Details row per Service Type. Kept by neither the server nor the
+ * panel beyond the browser session.
+ */
+export interface BhelClaim {
+  documents: { fileName: string; docType: string | null; pageCount: number | null; error?: string }[];
+  patient: { name?: string; ipNo?: string; company?: string; consultant?: string };
+  /** The IP number. */
+  visitId: string | null;
+  /** The summary bill's invoice number (ICO…). */
+  billNo: string | null;
+  /** dd/mm/yyyy hh:mm, as the site's date boxes show it: D.O.A, D.O.D, and D.O.D again for the bill. */
+  visitDateTime: string | null;
+  dischargeDateTime: string | null;
+  billDateTime: string | null;
+  rows: BhelRow[];
+  /** Sections left for the person — none since 2026-11-11 (the rest go under Other Unlisted Item); kept for bills read before. */
+  manual: { section: string; amount: number; reason: string }[];
+  totals: { billTotal: number; netAmount: number | null; rows: number; manual: number };
+  checks: ClaimCheck[];
+}
+
+/**
+ * POST /api/claims/tgnpdcl-pharmacy (the pharmacy bill alone: its PDF or the HIS Excel) — TGNPDCL's own
+ * pharmacy upload Excel and what is in it, for the site's "Upload Excel" on "3. Pharmacy". The same rows
+ * as the TGNPDCL bill view's Pharmacy tab. Kept by neither the server nor the panel.
+ */
+export interface TgnpdclPharmacySheet {
+  documents: { fileName: string; docType: string | null; pageCount: number | null }[];
+  patient: { name?: string | null; ipNo?: string | null };
+  rows: TgnpdclPharmacyRow[];
+  bill: { issued: number | null; returned: number | null; net: number | null; source: 'pdf' | 'excel' };
+  checks: ClaimCheck[];
+  /** The upload Excel (base64); absent when the bill has no item to enter. */
+  file?: { fileName: string; base64: string };
+}
+
 /** TARIFF_TYPE of the SPDCL upload file (column A), as the template's dropdown lists them. */
 export type SpdclTariff = 'CGHS' | 'EHS' | 'NIMS_2015' | 'COVID_TARIFF';
 
@@ -177,6 +276,57 @@ export interface SpdclSheet {
   fileBase64: string;
 }
 
+/** TARIFF_TYPE of TG Transco's bill template (column B), as its dropdown lists them. */
+export type TgTranscoTariff =
+  | 'CGHS NABH' | 'CGHS NON-NABH' | 'CGHS SUPERSPECIALITY' | 'EHS SUPERSPECIALITY'
+  | 'EHS NON-SUPERSPECIALITY' | 'NIMS 2015' | 'TATAMEMORIAL' | 'NOT LISTED';
+
+/** One row of TG Transco's bill file (backend/src/claims/tgtransco.js). Amount = rate × qty. */
+export interface TgTranscoRow {
+  /** Service_Type, as the template's list: ROOM RENT, CONSULTATION, INVESTIGATIONS, SURGERY CHARGES, PHARMACY, OTHERS… */
+  head: string;
+  /** PACKAGE for surgery and implants and for rows on or after the date of surgery. */
+  packageType: 'PACKAGE' | 'NON PACKAGE';
+  /** The bill's code without its tariff mark (3055/NIMS → 3055). */
+  code: string | null;
+  description: string;
+  /** dd.mm.yyyy; null when not known (surgery rows before the date of surgery is given). */
+  date: string | null;
+  rate: number;
+  qty: number;
+  amount: number;
+  /** The final-bill section it came from, or "Pharmacy". */
+  section: string;
+}
+
+/**
+ * POST /api/claims/tgtransco (the HIS final bill and pharmacy bill .xlsx, multipart;
+ * optional admissionDate, dischargeDate, surgeryDate as dd/mm/yyyy, and tariffType) —
+ * TG Transco's bill file, ready to save, and what is in it. Kept by neither the server nor the panel.
+ */
+export interface TgTranscoSheet {
+  documents: { fileName: string; kind: 'final-bill' | 'pharmacy-bill' }[];
+  patient: { name: string | null; ipNo: string | null };
+  tariffType: TgTranscoTariff;
+  /** dd.mm.yyyy: typed by the person, or (admissionAssumed) the earliest date on the bills. */
+  admissionDate: string | null;
+  admissionAssumed: boolean;
+  /** dd.mm.yyyy as typed; the bills do not have it. */
+  dischargeDate: string | null;
+  /** dd.mm.yyyy: typed, or (surgeryAssumed) the date on the bill's surgery lines. */
+  surgeryDate: string | null;
+  surgeryAssumed: boolean;
+  lastDate: string | null;
+  stayDays: number;
+  rows: TgTranscoRow[];
+  heads: { head: string; rows: number; amount: number }[];
+  /** excel: the file's total (returns taken off); package: its PACKAGE rows; hisBill: the final bill's Grand Total; difference = hisBill − excel. */
+  totals: { excel: number; package: number; hisBill: number | null; netAmount: number | null; pharmacyBill: number | null; difference: number };
+  checks: ClaimCheck[];
+  fileName: string;
+  fileBase64: string;
+}
+
 export interface UploadResponse {
   documents: DocumentDto[];
   rejected: { fileName: string; error: string }[];
@@ -208,13 +358,13 @@ export interface ExtractedTable {
 }
 
 /** The sites whose bills FillPilot reads (BILLS_READ in the activity log). */
-export type BillSite = 'tgnpdcl' | 'pmjay' | 'cil' | 'spdcl';
+export type BillSite = 'tgnpdcl' | 'pmjay' | 'cil' | 'bhel' | 'spdcl' | 'tgnpdcl-pharmacy' | 'tgtransco';
 
 /** GET /api/dashboard/stats — the caller's own work; one final + summary bill read = 1 bill. */
 export interface DashboardStats {
   today: { bills: number; pdfs: number };
   last30Days: {
-    bills: { tgnpdcl: number; pmjay: number; cil: number; total: number };
+    bills: { tgnpdcl: number; pmjay: number; cil: number; bhel: number; total: number };
     pdfs: number;
     pages: number;
     fills: number;
@@ -309,6 +459,8 @@ export interface FieldAlias {
 export interface FillSession {
   id: number;
   user: string | null;
+  /** The user's unit. */
+  unit?: string | null;
   documentIds: string[];
   documentNames: string[];
   origin: string;
@@ -341,10 +493,11 @@ export interface TeamReportRow {
   userId: number;
   username: string;
   fullName: string;
-  role: 'Admin' | 'User';
+  role: Role;
+  unit: string | null;
   isActive: boolean;
   /** Patients' bills read (one final + summary bill = 1), per site. */
-  bills: { tgnpdcl: number; pmjay: number; cil: number; total: number };
+  bills: { tgnpdcl: number; pmjay: number; cil: number; bhel: number; total: number };
   pdfs: number;
   pages: number;
   /** PDFs uploaded for the other (any-PDF) mode. */
@@ -359,6 +512,8 @@ export interface TeamReportRow {
 export interface TeamReport {
   from: string;
   to: string;
+  /** The unit reported on; null = every unit. */
+  unit?: string | null;
   rows: TeamReportRow[];
 }
 

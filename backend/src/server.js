@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
@@ -25,7 +26,9 @@ if (AI_PROVIDER !== 'off') {
 
 const app = express();
 app.set('trust proxy', 'loopback');
-app.use(helmet());
+// The server is reached over plain http on the hospital network (http://<PC>:4100):
+// "upgrade-insecure-requests" would send the dashboard's own scripts to https and break it.
+app.use(helmet({ contentSecurityPolicy: { directives: { upgradeInsecureRequests: null } } }));
 
 // Browser origins allowed to call the API: the dashboard and the extension
 // (chrome-extension://<id>). Requests with no Origin (curl, server-to-server)
@@ -61,6 +64,7 @@ app.use('/api', requireAuthExcept(['/api/health', '/api/auth/login']));
 
 app.use('/api/auth', require('./routes/auth.routes'));
 app.use('/api/users', require('./routes/users.routes'));
+app.use('/api/units', require('./routes/units.routes'));
 app.use('/api/documents', require('./routes/documents.routes'));
 app.use('/api/match', require('./routes/match.routes'));
 app.use('/api/form-mappings', require('./routes/form-mappings.routes'));
@@ -76,6 +80,31 @@ app.use('/api/claims', require('./routes/claims.routes'));
 if (process.env.DEMO_FORMS === 'true' && process.env.NODE_ENV !== 'production') {
   app.use('/demo/forms', express.static(path.join(__dirname, '..', 'demo-forms')));
 }
+
+// The dashboard (web/, built with "npm.cmd run build" there), served from this same
+// address: admins open http://<this PC>:4100/ in Chrome — nothing else to install or
+// start. It calls /api on the same address, so it needs no CORS or proxy either.
+// DASHBOARD_DIR points at another build.
+const DASHBOARD_DIR = process.env.DASHBOARD_DIR || path.join(__dirname, '..', '..', 'web', 'dist', 'dashboard', 'browser');
+const DASHBOARD_INDEX = path.join(DASHBOARD_DIR, 'index.html');
+const dashboardBuilt = () => fs.existsSync(DASHBOARD_INDEX);
+app.use(express.static(DASHBOARD_DIR, {
+  index: false,
+  setHeaders: (res, file) => {
+    // The bundles carry a hash in their names, so a rebuild gives new names; index.html is asked for fresh every time.
+    res.setHeader('Cache-Control', /\.html$/i.test(file) ? 'no-cache' : 'public, max-age=31536000, immutable');
+  },
+}));
+// Any other page address (/users, /team-report, …) is one of the dashboard's own pages: its index.html.
+app.use((req, res, next) => {
+  if ((req.method !== 'GET' && req.method !== 'HEAD') || /^\/(api|extension|demo)(\/|$)/.test(req.path)) return next();
+  if (!dashboardBuilt()) {
+    return res.status(404).type('text/plain')
+      .send('The FillPilot dashboard is not built yet. On the server PC run "npm.cmd run build" in the web folder, then reload this page.');
+  }
+  res.setHeader('Cache-Control', 'no-cache');
+  return res.sendFile(DASHBOARD_INDEX);
+});
 
 app.use((req, res) => {
   res.status(404).json({ error: `No route for ${req.method} ${req.originalUrl}` });
@@ -112,6 +141,9 @@ async function start() {
     console.log(`FillPilot backend listening on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
     // The address the other PCs' extension is built with (API_BASE, see extension/build.mjs).
     if (HOST === '0.0.0.0') for (const address of networkAddresses()) console.log(`  from other PCs: http://${address}:${PORT}`);
+    console.log(dashboardBuilt()
+      ? `Dashboard (users, units, team report): open the address above in Chrome, e.g. http://localhost:${PORT}/`
+      : 'Dashboard not built yet — run "npm.cmd run build" in the web folder to serve it from this address.');
   });
   server.on('error', async (err) => {
     if (err.code === 'EADDRINUSE' && (await alreadyRunning())) {

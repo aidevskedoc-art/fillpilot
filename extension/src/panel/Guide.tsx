@@ -26,9 +26,9 @@ const TABS: { n: number; name: string; level: Level; fills: string; you: string 
   {
     n: 3,
     name: 'Pharmacy',
-    level: 'you',
-    fills: 'Opens the tab.',
-    you: 'The pharmacy items — the bills give only a pharmacy total, not an item-wise list.',
+    level: 'part',
+    fills: 'With the pharmacy bill (its PDF or the hospital\'s Excel) chosen with the other bills: the site\'s own pharmacy Excel — date, item, amount per item, qty, returns taken off — given to the tab, which fills its table from it. "Download Excel" saves the same file; the "Excel & PDF" tab makes it from the pharmacy bill alone.',
+    you: 'Check the table the site shows, and enclose the pouches of items costing ₹2,000 or more each. Without the pharmacy bill, the pharmacy items.',
   },
   {
     n: 4,
@@ -157,10 +157,10 @@ function WhereFigure({ local }: { local: boolean }) {
 
 /** Figure 3: the site's five tabs and who fills each. */
 function TabsFigure() {
-  const tabs: [string, string, Level][] = [['0', 'CC', 'you'], ['1', 'Room', 'full'], ['2', 'Investigations', 'part'], ['3', 'Pharmacy', 'you'], ['4', 'Summary', 'part']];
+  const tabs: [string, string, Level][] = [['0', 'CC', 'you'], ['1', 'Room', 'full'], ['2', 'Investigations', 'part'], ['3', 'Pharmacy', 'part'], ['4', 'Summary', 'part']];
   const legend: [Level, string][] = [['full', 'FillPilot fills'], ['part', 'fills part — you finish'], ['you', 'you fill']];
   return (
-    <svg viewBox="0 0 360 76" role="img" aria-label="Tab 1 is filled by FillPilot; tabs 2 and 4 partly; tab 0 and tab 3 are filled by you.">
+    <svg viewBox="0 0 360 76" role="img" aria-label="Tab 1 is filled by FillPilot; tabs 2, 3 and 4 partly; tab 0 is filled by you.">
       {tabs.map(([n, name, level], i) => (
         <g key={n}>
           <rect x={4 + i * 71} y={4} width={66} height={44} rx={8} className={`fig-tab-${level}`} />

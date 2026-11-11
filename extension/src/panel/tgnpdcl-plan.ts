@@ -50,12 +50,16 @@ const NEXT = '^\\s*Next(\\s*(step|tab))?\\s*[»›→>▸]*\\s*$';
  * has ₹500) and COMM is EHS Ax-VI — confirmed with the hospital, 2026-10-13.
  * CGHS is not printed: the backend marks unmarked CGHS codes (MG038) with it,
  * and they go to "CGHS(2025)-Tier I" (Hyderabad is a Tier I city), never Tier II or III.
+ * EHS is not printed either: the backend marks the dotted procedure codes
+ * (51.22.6) with it, and they are looked for in "EHS Ax-III", then "EHS Ax-II"
+ * (the client, 2026-11-11) — the first list that has the code is used.
  * A mark that is not listed here is never guessed — its codes are left for the person.
  */
-const TARIFF_OPTION: Record<string, string> = {
+const TARIFF_OPTION: Record<string, string | string[]> = {
   NIMS: '^EHS\\s*Ax\\s*-?\\s*V\\s*$',
   COMM: '^EHS\\s*Ax\\s*-?\\s*VI\\s*$',
   CGHS: '^CGHS\\s*\\(\\s*2025\\s*\\)\\s*[-‐‑–—]?\\s*Tier\\s*[-‐‑–—]?\\s*(I|1)\\s*$',
+  EHS: ['^EHS\\s*Ax\\s*-?\\s*III\\s*$', '^EHS\\s*Ax\\s*-?\\s*II\\s*$'],
 };
 
 /** Captions this profile relies on — located in the page outline saved when a step fails. */
@@ -64,9 +68,12 @@ export const OUTLINE_PROBES = [
   '^\\s*(Next|Back)\\b', 'Add\\s*(ward|doctor|row|item)', 'Add\\s*from\\s*tariff',
   'ICU\\s*Days', 'Number\\s*of\\s*Doctors', 'Ward\\s*Occupied', 'Rate\\s*Charged', 'Doctor\\s*Name',
   'Tariff\\s*Type', 'Search\\s*tariff', 'Amount\\s*claimed', 'Employee\\s*paid', 'Concession', 'Hospital\\s*bill\\s*number',
+  'Upload\\s*Excel', 'Download\\s*Template', 'Name\\s*of\\s*item', 'Loaded\\s+\\d+\\s+pharmacy',
 ];
 
 const rupees = (n: number | null | undefined) => (n == null ? '—' : `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`);
+/** "2026-10-09" → "09/10/2026", as the site shows dates. */
+const dayMonthYear = (iso: string | null) => (iso ? iso.split('-').reverse().join('/') : 'no date');
 /** " (or 781)" — a code whose last character OCR cannot settle; the site's price for each reading decides. */
 const orReadings = (alternatives?: string[]) => (alternatives?.length ? ` (or ${alternatives.join(' / ')})` : '');
 
@@ -103,7 +110,12 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
   }
 
   // ---- 2. Investigations and Procedures
-  const optionFor = (tariff: string | null) => (tariff && TARIFF_OPTION[tariff]) || null;
+  /** The tariff types to search for a mark, in order (most marks have one). */
+  const optionsFor = (tariff: string | null): string[] => {
+    const o = tariff ? TARIFF_OPTION[tariff] : undefined;
+    return o ? (Array.isArray(o) ? o : [o]) : [];
+  };
+  const optionFor = (tariff: string | null) => optionsFor(tariff)[0] ?? null;
   // One tariff type after the other — every switch makes the site load that tariff's list again.
   // Codes whose tariff type is not known come last: they are reported, not searched.
   const coded = investigations.items
@@ -120,6 +132,7 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
       code: i.code!,
       tariff: i.tariff,
       tariffOption: optionFor(i.tariff),
+      ...(optionsFor(i.tariff).length > 1 ? { moreTariffOptions: optionsFor(i.tariff).slice(1) } : {}),
       qty: i.qty,
       amountClaimed: i.amountClaimed,
       ...(i.alternatives?.length ? { alternatives: i.alternatives } : {}),
@@ -127,11 +140,16 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
     })),
   ];
 
-  // ---- 3. Pharmacy (rows only when the claim has itemised rows)
+  // ---- 3. Pharmacy — the pharmacy bill's rows, as the site's own upload Excel (the team's way: the site fills its table from it)
   const pharmacyActions: PageAction[] = [{ type: 'clickTab', text: TAB.pharmacy, next: NEXT, label: 'Open "3. Pharmacy"' }];
-  if (pharmacy.rows.length) {
-    pharmacyActions.push({ type: 'ensureRows', headers: PHARMACY_TABLE, count: pharmacy.rows.length, addButton: 'Add\\s*row', label: `${pharmacy.rows.length} pharmacy row(s)` });
+  const pharmacyTotal = Math.round(pharmacy.rows.reduce((s, r) => s + r.amount, 0) * 100) / 100;
+  if (pharmacy.rows.length && pharmacy.file) {
+    pharmacyActions.push({
+      type: 'loadPharmacyExcel', fileName: pharmacy.file.fileName, base64: pharmacy.file.base64, rows: pharmacy.rows.length, total: pharmacyTotal, headers: PHARMACY_TABLE,
+      label: `Pharmacy Excel: ${pharmacy.rows.length} item(s), ${rupees(pharmacyTotal)}`,
+    });
   }
+  const pouches = pharmacy.rows.filter((r) => r.pouch);
 
   // ---- 4. Summary — inputs only; declarations and Save & Submit stay with the person
   const summaryActions: PageAction[] = [{ type: 'clickTab', text: TAB.summary, next: NEXT, label: 'Open "4. Summary"' }];
@@ -171,8 +189,14 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
     {
       key: 'pharmacy',
       title: '3. Pharmacy',
-      preview: pharmacy.rows.length ? [`${pharmacy.rows.length} row(s)`] : [],
-      manual: pharmacy.note ? [pharmacy.note] : [],
+      preview: pharmacy.rows.map((r) => `${dayMonthYear(r.date)} — ${r.name} — ${r.qty} × ${rupees(r.rate)} = ${rupees(r.amount)}${r.pouch ? ' · pouch' : ''}`),
+      manual: [
+        ...(pharmacy.note ? [pharmacy.note] : []),
+        ...(pouches.length
+          ? [`Enclose the pouches of ${pouches.length} item(s) costing ₹2,000 or more each (${pouches.reduce((n, r) => n + r.qty, 0)} pouch(es)) with the original bill`]
+          : []),
+        ...(pharmacy.rows.length ? ['If the site does not take the Excel, use "Download Excel" below and the site\'s "Upload Excel" button'] : []),
+      ],
       actions: pharmacyActions,
       nothingToFill: !pharmacy.rows.length,
     },
@@ -199,6 +223,8 @@ export function auditLabel(action: PageAction): string {
     case 'ensureRows': return `${words(action.headers[0])} table: rows`;
     case 'setCell': return `${words(action.headers[0])} table, row ${action.row + 1}: ${words(action.column)}`;
     case 'addTariffItem': return `Tariff code ${action.code}${action.tariff ? ` (${action.tariff})` : ''}`;
+    // The item names stay out of the log.
+    case 'loadPharmacyExcel': return `Pharmacy Excel (${action.rows} row(s))`;
     default: return action.label;
   }
 }

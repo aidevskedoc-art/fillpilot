@@ -1,18 +1,25 @@
 const express = require('express');
 const db = require('../db');
-const { requireAdmin } = require('../middleware/auth');
+const { requireManager } = require('../middleware/scope');
+const { unitFilter } = require('../user-scope');
 const { route, clampInt } = require('./helpers');
 
 const router = express.Router();
-router.use(requireAdmin);
+router.use(requireManager);
 
-// GET ?action=&limit=&offset=
+// GET ?action=&unit=&limit=&offset= — the Main Admin: everything (or one unit's
+// people); a Unit Admin: what their unit's people did, or had done to them.
 router.get('/', route(async (req, res) => {
   const params = [];
-  let where = '';
+  const where = [];
   if (req.query.action) {
     params.push(String(req.query.action));
-    where = `WHERE a.action = $${params.length}`;
+    where.push(`a.action = $${params.length}`);
+  }
+  const unit = unitFilter(req.scope, req.query.unit);
+  if (unit) {
+    params.push(unit);
+    where.push(`(actor.unit_code = $${params.length} OR target.unit_code = $${params.length})`);
   }
   const limit = clampInt(req.query.limit, 1, 500, 200);
   const offset = clampInt(req.query.offset, 0, 1e9, 0);
@@ -21,7 +28,7 @@ router.get('/', route(async (req, res) => {
        FROM audit_logs a
        LEFT JOIN users actor ON actor.id = a.actor_user_id
        LEFT JOIN users target ON target.id = a.target_user_id
-       ${where}
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY a.created_at DESC
       LIMIT ${limit} OFFSET ${offset}`,
     params,

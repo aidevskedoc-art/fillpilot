@@ -10,3 +10,7 @@ export const loginRedirectGuard: CanActivateFn = () =>
 
 export const adminGuard: CanActivateFn = () =>
   inject(AuthService).isAdmin() ? true : inject(Router).parseUrl('/dashboard');
+
+/** The Main Admin or a Unit Admin. */
+export const managerGuard: CanActivateFn = () =>
+  inject(AuthService).isManager() ? true : inject(Router).parseUrl('/dashboard');

@@ -22,7 +22,9 @@ function joinItems(items) {
 
 /**
  * page: { page, items: [{ str, x, y, w, h }] }
- * returns lines top-to-bottom: { page, index, y, h, segments: [{ text, x0, x1 }], text }
+ * returns lines top-to-bottom: { page, index, y, h, segments: [{ text, x0, x1, words }], text }
+ * words: the segment's items ({ text, x0, x1 }) — for a reader whose columns sit
+ * closer than a column break (the pharmacy bill's item, batch and expiry).
  */
 function buildLines(page) {
   const items = [...page.items].sort((a, b) => b.y - a.y || a.x - b.x);
@@ -58,6 +60,7 @@ function buildLines(page) {
         text: joinItems(group),
         x0: group[0].x,
         x1: group[group.length - 1].x + group[group.length - 1].w,
+        words: group.map((it) => ({ text: it.str.trim(), x0: it.x, x1: it.x + it.w })).filter((w) => w.text),
       }))
       .filter((s) => s.text);
 

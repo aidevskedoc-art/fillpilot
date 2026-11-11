@@ -17,7 +17,10 @@ export class AuthService {
   readonly token = signal<string | null>(read(TOKEN_KEY));
   readonly user = signal<User | null>(parse(read(USER_KEY)));
   readonly isAuthenticated = computed(() => Boolean(this.token()));
+  /** The Main Admin: every unit, approved websites, mappings. */
   readonly isAdmin = computed(() => this.user()?.role === 'Admin');
+  /** The Main Admin or a Unit Admin: users, team report and everyone's activity — a Unit Admin for their unit only. */
+  readonly isManager = computed(() => this.user()?.role === 'Admin' || this.user()?.role === 'UnitAdmin');
 
   async login(username: string, password: string): Promise<void> {
     const res = await firstValueFrom(this.http.post<LoginResponse>('/api/auth/login', { username, password }));

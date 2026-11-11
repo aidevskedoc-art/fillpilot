@@ -1,0 +1,80 @@
+# Builds FillPilot on GitHub's servers — the team's PCs cannot run esbuild, which both
+# the dashboard (Angular) and the extension need. Every push builds; the results are on
+# the run's page under "Artifacts":
+#   fillpilot-dashboard   unzip into web\dist on the server PC (→ web\dist\dashboard\browser),
+#                         restart the server, open http://<server PC>:4100/
+#   fillpilot-extension   the team's extension (server http://192.152.23.37:4100): unzip into a
+#                         folder and load it in chrome://extensions → Load unpacked
+# The backend's pure tests run too (no database, no OCR, no patient bills).
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the dashboard
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fillpilot-dashboard
+          path: web/dist
+          retention-days: 30
+
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - name: Build the team's extension
+        working-directory: extension
+        env:
+          # The FillPilot server the team's PCs talk to (the dev PC, fixed address).
+          API_BASE: http://192.152.23.37:4100
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fillpilot-extension
+          path: extension/dist
+          retention-days: 30
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Pure tests (units, bill reading on hand-built lines)
+        working-directory: backend
+        env:
+          OCR_PROVIDER: 'off'
+        run: |
+          npm ci
+          node scripts/test-user-scope.js
+          node scripts/test-yashoda.js
+          node scripts/test-spdcl.js
+          node scripts/test-tgtransco.js

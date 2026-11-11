@@ -4,14 +4,16 @@
 // captions), not by ids/classes the site may change.
 //
 // Safety: a click on anything captioned save / submit / remove / delete /
-// request / print / cancel / logout is refused here, whatever the caller asks.
+// request / print / cancel / logout / draft / accept is refused here, whatever
+// the caller asks.
 
-import type { ActionResult, PageAction, PageIdentity, PageOutline } from '../../../web/projects/shared/src/page-contract';
+import type { ActionResult, PageAction, PageIdentity, PageOutline, PageSpot } from '../../../web/projects/shared/src/page-contract';
 import { fillControl, flash, OUTLINE, setNativeValue } from './fill';
 
 type Control = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
-const FORBIDDEN_CLICK = /\b(save|submit|remove|delete|request|print|cancel|log\s*out|sign\s*out|upload|download)\b/i;
+/** "Draft" and "Accept" save the BHEL KareXpert bill. */
+const FORBIDDEN_CLICK = /\b(save|submit|remove|delete|request|print|cancel|log\s*out|sign\s*out|upload|download|draft|accept)\b/i;
 const CONTROL_SELECTOR = 'input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=reset]):not([type=image]):not([type=file]), select, textarea';
 const CLICKABLE_SELECTOR = 'button, a, [role="tab"], [role="button"], input[type="button"], .nav-link, li';
 
@@ -486,12 +488,12 @@ function resultPrice(hit: HTMLElement, code: string): number | null {
   return m ? Number(m[1].replace(/,/g, '')) : null;
 }
 
-/** What the page added after typing — tells how this site shows its search results. */
-function describeAppeared(appeared: HTMLElement[]): string {
+/** What the page added after typing (or `after` something else) — tells how this site answers. */
+function describeAppeared(appeared: HTMLElement[], after = 'typing the code'): string {
   const live = appeared.filter((el) => el.isConnected && isVisible(el) && textOf(el));
   const roots = live.filter((el) => !live.some((o) => o !== el && o.contains(el))).slice(0, 3);
-  if (!roots.length) return 'nothing appeared on the page after typing the code';
-  return `after typing the page showed: ${roots.map((el) => `[${domPath(el).split(' < ').slice(0, 3).join(' < ')}] "${textOf(el).slice(0, 70)}"`).join(' | ')}`;
+  if (!roots.length) return `nothing appeared on the page after ${after}`;
+  return `after ${after} the page showed: ${roots.map((el) => `[${domPath(el).split(' < ').slice(0, 3).join(' < ')}] "${textOf(el).slice(0, 70)}"`).join(' | ')}`;
 }
 
 /** Types into a search box and keeps focus there — many result lists close on blur. */
@@ -516,7 +518,9 @@ function typeInto(control: HTMLInputElement, value: string): void {
  * the bill's reading is kept (or the one the site has) and the step is marked
  * for the person to check.
  */
-async function addTariffItem(code: string, tariff: string | null, qty: number, amountClaimed: number, option?: string | null, alternatives: string[] = []): Promise<{ message: string; warn: boolean }> {
+async function addTariffItem(
+  code: string, tariff: string | null, qty: number, amountClaimed: number, option?: string | null, alternatives: string[] = [], moreOptions: string[] = [],
+): Promise<{ message: string; warn: boolean }> {
   const readings = [code, ...alternatives.filter((c) => c.toUpperCase() !== code.toUpperCase())];
   /** The reading that went on the bill, and why it needs checking when that is not certain. */
   let used = code;
@@ -543,13 +547,60 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
       throw new StepStopped('The "Tariff Type" box was not recognised on this page, so nothing was added (the page layout has been saved for the developer)');
     }
     const options = Array.from(typeSelect.options).filter((o) => o.value !== '');
-    const wanted = option ? options.find((o) => rx(option).test(norm(o.text))) : null;
-    if (!wanted) {
+    const patterns = [option, ...moreOptions].filter((p): p is string => Boolean(p));
+    const candidates = patterns
+      .map((p) => options.find((o) => rx(p).test(norm(o.text))))
+      .filter((o): o is HTMLOptionElement => Boolean(o));
+    if (!candidates.length) {
       const types = options.map((o) => norm(o.text)).join(' / ');
       throw new Error(option
-        ? `The bill marks this code "${tariff}", but none of the site's tariff types (${types}) matches the one expected for it (${readable(option)}) — enter it yourself`
+        ? `The bill marks this code "${tariff}", but none of the site's tariff types (${types}) matches the one expected for it (${patterns.map(readable).join(' or ')}) — enter it yourself`
         : `The bill marks this code "${tariff ?? 'no tariff'}" and it is not known which of the site's tariff types that is (${types}) — enter it yourself`);
     }
+    // Several tariff types for one mark (EHS: Ax-III, then Ax-II): the code is added from
+    // the first that lists it at the bill's rate. One that lists it at another price is
+    // passed over for the next — and used after all, marked to check, when none fits. A
+    // type that does not list it is passed over too; any other trouble stops there.
+    const rate = qty ? Math.round((amountClaimed / qty) * 100) / 100 : null;
+    const fits = candidates.length > 1 ? (price: number | null) => price != null && rate != null && Math.abs(price - rate) <= 0.5 : undefined;
+    const missed: string[] = [];
+    const priced: { type: HTMLOptionElement; price: number | null }[] = [];
+    let failure = '';
+    for (const [k, wanted] of candidates.entries()) {
+      const outcome = await searchTariffType(wanted, search, typeSelect, fits);
+      if (outcome.row) {
+        found = outcome.row;
+        break;
+      }
+      failure = outcome.failure;
+      if (outcome.otherPrice) priced.push({ type: wanted, price: outcome.price });
+      else if (!outcome.notListed) break;
+      else missed.push(norm(wanted.text));
+      if (k === candidates.length - 1) break;
+    }
+    if (!found && priced.length) {
+      // Listed, but not at the bill's rate anywhere: the first such type, for the person to check.
+      const first = priced[0];
+      const outcome = await searchTariffType(first.type, search, typeSelect);
+      found = outcome.row;
+      failure = outcome.failure;
+      const prices = priced.map((p) => `${norm(p.type.text)} ${p.price != null ? `₹${p.price}` : 'no price shown'}`).join(', ');
+      if (found) doubt = `the bill's rate is ₹${rate}, but the site lists ${used} at ${prices}${missed.length ? ` (not in ${missed.join(', ')})` : ''} — added from ${norm(first.type.text)}; check it is the right item`;
+    }
+    if (!found) throw new Error(missed.length ? `not in ${missed.join(', ')}; ${failure}` : failure);
+    if (missed.length && !doubt) via = `${via}, not in ${missed.join(', ')}`;
+  }
+
+  /**
+   * Chooses one tariff type and searches the code (or its other readings) in it,
+   * pressing the result. → row: the new row on the site's bill; notListed: no
+   * result at all — the code is not in this tariff type's list. With `accept`, a
+   * result whose price it refuses is not pressed: otherPrice, with that price.
+   */
+  async function searchTariffType(
+    wanted: HTMLOptionElement, search: HTMLInputElement, typeSelect: HTMLSelectElement, accept?: (price: number | null) => boolean,
+  ): Promise<{ row: BillRow | null; failure: string; notListed: boolean; otherPrice?: boolean; price?: number | null }> {
+    let found: BillRow | null = null;
     const switched = typeSelect.value !== wanted.value;
     if (switched) {
       fillControl(typeSelect, wanted.value);
@@ -563,6 +614,7 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
     });
     observer.observe(document.body, { childList: true, subtree: true });
     let failure = '';
+    let notListed = false;
     try {
       // After a change of tariff type the site first loads that tariff's list —
       // the code is typed again until the list is there to be filtered.
@@ -621,6 +673,11 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
           if (typedOther) hit = await look(2, used);
         }
       }
+      // Listed here at another price than the bill's: not pressed — another tariff type may list it at the bill's rate.
+      if (hit && accept && !accept(resultPrice(hit, used))) {
+        const price = resultPrice(hit, used);
+        return { row: null, failure: `${used} is in ${via} at ${price != null ? `₹${price}` : 'no price shown'}`, notListed: false, otherPrice: true, price };
+      }
       let picked: string | null = null;
       if (!hit) {
         for (const c of readings) {
@@ -657,14 +714,18 @@ async function addTariffItem(code: string, tariff: string | null, qty: number, a
           failure = `chose "${(hit ? textOf(hit) : picked || '').slice(0, 70)}" but no row with code ${used} appeared (tables: ${tables})`;
         }
       } else {
+        notListed = true;
         failure = `no search result for ${readings.join(' or ')} in ${via} — ${describeAppeared(appeared)}`;
       }
     } finally {
       observer.disconnect();
       typeInto(search, '');
     }
-    if (!found) throw new Error(failure);
+    return { row: found, failure, notListed };
   }
+
+  // Not found by any search: `found` is set by searchTariffType, or by the row already on the bill.
+  if (!found) throw new Error(`no row for ${code} on the site's bill`);
 
   const problems: string[] = [];
   await sleep(PACE.part);
@@ -786,7 +847,7 @@ const treatmentRows = (t: { table: HTMLTableElement }) => Array.from(t.table.tBo
  * characters of a long name ("Haemodialysis /...Show More"), so a shortened
  * name that matches may still be a different procedure — exact: false.
  */
-function rowLike(name: string): { shown: string; exact: boolean } | null {
+function rowLike(name: string): { row: HTMLTableRowElement; shown: string; exact: boolean } | null {
   const t = treatmentTable();
   if (!t) return null;
   const wanted = norm(name).toLowerCase();
@@ -794,20 +855,21 @@ function rowLike(name: string): { shown: string; exact: boolean } | null {
     const raw = norm(row.cells[t.procedureColumn]?.textContent);
     const shortened = /show\s*more\s*$/i.test(raw);
     const shown = raw.replace(/\.{2,}\s*show\s*more\s*$/i, '').replace(/[\s/(]+$/, '').toLowerCase();
-    if (!shortened && shown === wanted) return { shown, exact: true };
-    if (shortened && shown.length >= 4 && wanted.startsWith(shown)) return { shown, exact: false };
+    if (!shortened && shown === wanted) return { row, shown, exact: true };
+    if (shortened && shown.length >= 4 && wanted.startsWith(shown)) return { row, shown, exact: false };
   }
   return null;
 }
 
 /** Not added because the table seems to have it — always shown to the person, never a quiet tick. */
-function skippedAsPresent(code: string, like: { shown: string; exact: boolean }) {
+function skippedAsPresent(code: string, name: string, like: { shown: string; exact: boolean }) {
   return {
     message: like.exact
       ? `${code} is already in the Treatment Plan — not added again`
       : `a row starting "${like.shown}…" is already in the Treatment Plan — it may be ${code}, so it was not added; check the table`,
     warn: true,
     skipped: true,
+    name,
   };
 }
 
@@ -867,9 +929,10 @@ function pressCentre(el: Element): void {
  * Adds one procedure to the Treatment Plan: picks the entry ending "(code-…)"
  * in Procedure, types No. of Days/Units, presses "+" and waits for the new row.
  * A code with several entries (stratifications) is never guessed, and an entry
- * already in the table is not added twice.
+ * already in the table is not added twice. name: the entry's name — how its
+ * table row is found again.
  */
-async function addProcedure(code: string, units: number): Promise<{ message: string; warn: boolean; skipped?: boolean }> {
+async function addProcedure(code: string, units: number): Promise<{ message: string; warn: boolean; skipped?: boolean; name: string }> {
   const label = await waitFor(() => formLabel(PROCEDURE_LABEL), 3000);
   const widget = label ? dropdownAfter(label) : null;
   if (!widget) {
@@ -885,7 +948,7 @@ async function addProcedure(code: string, units: number): Promise<{ message: str
     }
     name = norm(matches[0].text).replace(entry, '').trim();
     const like = rowLike(name);
-    if (like) return skippedAsPresent(code, like);
+    if (like) return skippedAsPresent(code, name, like);
     const e = fillControl(widget.el, matches[0].value);
     if (e) throw new Error(`Procedure: ${e}`);
   } else {
@@ -914,7 +977,7 @@ async function addProcedure(code: string, units: number): Promise<{ message: str
     const like = rowLike(name);
     if (like) {
       close();
-      return skippedAsPresent(code, like);
+      return skippedAsPresent(code, name, like);
     }
     await sleep(PACE.part);
     const picked = options[0];
@@ -957,6 +1020,7 @@ async function addProcedure(code: string, units: number): Promise<{ message: str
   return {
     message: `${code} ${name.slice(0, 60)} — ${units} unit(s)${notes.length ? ` — ${notes.join('; ')}` : ''}`,
     warn: notes.length > 0,
+    name,
   };
 }
 
@@ -1218,6 +1282,13 @@ function amountIn(box: Control | null | undefined): number | null {
   return text && Number.isFinite(n) ? n : null;
 }
 
+/** A box holds this text — or its start, where the box cut a long name short. */
+function sameText(box: TextBox, text: string): boolean {
+  const have = norm(box.value).toLowerCase();
+  const want = norm(text).toLowerCase();
+  return have === want || (have.length >= 8 && want.startsWith(have));
+}
+
 /**
  * Adds one Bill Details row: into the first empty row of its section, or a new
  * one from the "+" after the last row. CGHS rows: the code (the site fills in
@@ -1238,11 +1309,6 @@ async function addCilRow(a: Extract<PageAction, { type: 'addCilRow' }>): Promise
   };
   const s = read(await waitFor(() => cilSection(a.section), 3000));
 
-  const sameText = (box: TextBox, text: string) => {
-    const have = norm(box.value).toLowerCase();
-    const want = norm(text).toLowerCase();
-    return have === want || (have.length >= 8 && want.startsWith(have));
-  };
   const withCode = s.rows.filter((r) => norm(r[CIL_COL.code].value).toUpperCase() === a.code.toUpperCase());
   // A CIL code is one row for the whole bill: any row with it means it is entered.
   if (a.section === 'cghs' && withCode.length) {
@@ -1350,6 +1416,9 @@ function boxesBeside(label: HTMLElement): Control[] {
     .slice(0, 4);
 }
 
+const CIL_PHARMACY_LABEL = '^\\s*Pharmacy\\s*Amount\\s*:?\\s*$';
+const CIL_GRAND_TOTAL_LABEL = '^\\s*Grand\\s*Total\\s*:?\\s*$';
+
 /**
  * The site's Pharmacy Amount and Grand Total (Hospital Amount column) against
  * the bill. The Grand Total may fall short by exactly what is left for the
@@ -1361,14 +1430,14 @@ async function checkCilTotals(netAmount: number | null, pharmacy: number | null,
   const fine: string[] = [];
 
   if (pharmacy != null) {
-    const label = formLabel('^\\s*Pharmacy\\s*Amount\\s*:?\\s*$');
+    const label = formLabel(CIL_PHARMACY_LABEL);
     const site = label ? amountIn(boxesBeside(label)[0]) : null;
     if (site == null) problems.push(`Pharmacy Amount not found on the page (the bill's pharmacy: ${pharmacy})`);
     else if (Math.abs(site - pharmacy) > 1) problems.push(`Pharmacy Amount on the site is ${site}, the bill's pharmacy is ${pharmacy} — check the Pharmacy/Consumable tab`);
     else fine.push(`Pharmacy ${site} matches the bill`);
   }
 
-  const label = formLabel('^\\s*Grand\\s*Total\\s*:?\\s*$');
+  const label = formLabel(CIL_GRAND_TOTAL_LABEL);
   const boxes = label ? boxesBeside(label) : [];
   // The Hospital Amount column: the box under that heading, else the one before the last (Entitled Amount).
   const header = textLeaves(rx('^\\s*Hospital\\s*Amount\\s*$'), 40)[0];
@@ -1390,6 +1459,377 @@ async function checkCilTotals(netAmount: number | null, pharmacy: number | null,
   return { message: [...problems, ...fine].join('. '), warn: problems.length > 0 };
 }
 
+// ------------------------------------------ TGNPDCL Pharmacy tab (upload Excel)
+
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const SHEET_ACCEPT = /xls|spreadsheet|excel/i;
+const UPLOAD_EXCEL = '^\\s*Upload\\s*Excel\\s*$';
+
+/**
+ * The open tab's Excel file box: the one beside its visible "Upload Excel"
+ * button (the box itself is hidden — the button opens it). The wizard keeps
+ * every tab in the page, and Investigations has an Excel upload of its own
+ * (#invExcelFile, also taking .xlsx): the pharmacy Excel went into that one
+ * on 2026-11-06. So a box counts only in the open tab — another tab's sits in
+ * a hidden pane — and only right beside the button; two there is no answer.
+ */
+function excelFileBox(): HTMLInputElement | null {
+  const button = textLeaves(rx(UPLOAD_EXCEL), 40)[0];
+  if (!button) return null;
+  // A <label for="…"> drawn as the button names its box outright.
+  const labelled = button.closest('label')?.control;
+  if (labelled instanceof HTMLInputElement && labelled.type === 'file' && !labelled.disabled) return labelled;
+  const inOpenTab = (b: HTMLElement) => {
+    let up: HTMLElement | null = b.parentElement;
+    for (let i = 0; i < 3 && up; i++, up = up.parentElement) if (isVisible(up)) return true;
+    return false;
+  };
+  const boxes = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="file"]'))
+    .filter((b) => !b.disabled && (SHEET_ACCEPT.test(b.accept) || !b.accept.trim()) && inOpenTab(b));
+  for (let level = 1; level <= 4; level++) {
+    const beside = boxes.filter((b) => near(button, b, level));
+    if (beside.length) return beside.length === 1 ? beside[0] : null;
+  }
+  return null;
+}
+
+/** "<input type=file accept=".xlsx" id="x"> in div.card < …" — which box a message is about. */
+const describeBox = (box: HTMLInputElement) =>
+  `<input type=file${box.accept ? ` accept="${box.accept}"` : ''}${box.id ? ` id="${box.id}"` : ''}${box.name ? ` name="${box.name}"` : ''}> in ${domPath(box).split(' < ').slice(1, 4).join(' < ')}`;
+
+/** The pharmacy table's items (rows with an item's name) and their Rate × Qty added up; null when the table is not there. */
+function pharmacyItems(headers: string[]): { count: number; total: number } | null {
+  const t = findTable(headers);
+  if (!t) return null;
+  let count = 0;
+  let total = 0;
+  for (const row of dataRows(t)) {
+    const name = cellControl(t, row, 'Name\\s*of\\s*item');
+    if (!name || !norm(name.value)) continue;
+    count++;
+    const rate = Number(cellControl(t, row, '^Rate$')?.value);
+    const qty = Number(cellControl(t, row, '^Qty$')?.value);
+    if (Number.isFinite(rate) && Number.isFinite(qty)) total += rate * qty;
+  }
+  return { count, total: Math.round(total * 100) / 100 };
+}
+
+/**
+ * Gives the pharmacy bill's Excel to the tab's file box, as a person choosing
+ * the file after "Upload Excel" does — that button is never pressed (nothing
+ * captioned upload ever is). The site reads the file and fills its table; the
+ * table is then counted and added up against the bill. A table that has items
+ * already is left alone, so a second Fill never enters them twice.
+ */
+async function loadPharmacyExcel(a: Extract<PageAction, { type: 'loadPharmacyExcel' }>): Promise<{ message: string; warn: boolean; skipped?: boolean }> {
+  // The table may only be drawn once there are items: no table is no items.
+  const before = pharmacyItems(a.headers);
+  if (before?.count) {
+    const same = before.count === a.rows && Math.abs(before.total - a.total) <= 1;
+    return {
+      message: same
+        ? `the table already has the bill's ${a.rows} item(s), ${before.total} — not loaded again`
+        : `the table already has ${before.count} item(s) (${before.total}); the bill has ${a.rows} (${a.total}) — nothing was loaded, so nothing goes in twice. Remove those rows on the site and press Fill again, or check them yourself`,
+      warn: !same,
+      skipped: true,
+    };
+  }
+  const box = excelFileBox();
+  if (!box) {
+    const others = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="file"]')).map(describeBox);
+    throw new Error('No Excel upload box of this tab was found beside its "Upload Excel" button — the site may make it only when that button is pressed, which FillPilot never does'
+      + `${others.length ? ` (upload boxes elsewhere on the page, left alone: ${others.join(' | ')})` : ''}. `
+      + 'Use "Download Excel" in the panel, then the site\'s "Upload Excel" button; "Copy page structure" shows the developer how the tab is built');
+  }
+
+  // What the site writes after taking the file ("Loaded 2 pharmacy items from Excel.") — never a notice that was there before.
+  const appeared: HTMLElement[] = [];
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of Array.from(record.addedNodes)) if (node instanceof HTMLElement) appeared.push(node);
+      if (record.type === 'characterData' && record.target.parentElement) appeared.push(record.target.parentElement);
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  let loaded: { count: number; total: number } | null = null;
+  let said: HTMLElement | undefined;
+  try {
+    const bytes = Uint8Array.from(atob(a.base64), (c) => c.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], a.fileName, { type: XLSX_TYPE }));
+    box.files = transfer.files;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+
+    // All the rows, or as many as the site took once it stops adding (it may have a row limit).
+    let seen = -1;
+    let still = 0;
+    loaded = await waitFor(() => {
+      const now = pharmacyItems(a.headers);
+      if (!now) return null;
+      if (now.count >= a.rows) return now;
+      still = now.count && now.count === seen ? still + 1 : 0;
+      seen = now.count;
+      return still >= 20 ? now : null;
+    }, 10000) ?? pharmacyItems(a.headers);
+    said = textLeaves(/Loaded\s+\d+\s+pharmacy\s+items?/i, 120).find((el) => appeared.some((root) => root.isConnected && (root.contains(el) || el.contains(root))));
+  } finally {
+    observer.disconnect();
+  }
+  const siteSays = said ? ` — the site: "${textOf(said)}"` : '';
+  if (!loaded?.count) {
+    throw new Error(`the Excel was given to ${describeBox(box)}, but no item appeared in the table (${describeAppeared(appeared, 'giving it the file')}). `
+      + 'Use "Download Excel" in the panel, then the site\'s "Upload Excel" button; "Copy page structure" shows the developer how the tab is built');
+  }
+  const problems: string[] = [];
+  if (loaded.count !== a.rows) problems.push(`the table shows ${loaded.count} of the bill's ${a.rows} item(s) — check which are missing`);
+  if (Math.abs(loaded.total - a.total) > 1) problems.push(`its Rate × Qty come to ${loaded.total}, the bill's rows to ${a.total} — check the table`);
+  return { message: `${loaded.count} item(s) loaded, ${loaded.total}${siteSays}${problems.length ? ` — ${problems.join('; ')}` : ''}`, warn: problems.length > 0 };
+}
+
+// ------------------------------------- BHEL KareXpert (Upload Bill screen)
+
+/** The calendar a date box opens (ngx-daterangepicker and its kin); its Apply button is inside it. */
+const DATE_PICKER = '.md-drppicker, ngx-daterangepicker-material, .daterangepicker, [class*="drppicker" i], [class*="daterangepicker" i], [class*="datepicker" i], .owl-dt-container, mat-datepicker-content';
+const PICKER_APPLY = /^\s*(apply|ok|done|set)\s*$/i;
+
+/** The open calendar's Apply / OK button. */
+function pickerApply(): HTMLElement | null {
+  return Array.from(document.querySelectorAll<HTMLElement>('button, [role="button"], input[type="button"]'))
+    .find((b) => isVisible(b) && PICKER_APPLY.test(textOf(b)) && Boolean(b.closest(DATE_PICKER)) && !isForbidden(b)) ?? null;
+}
+
+function escapeKey(box: Element): void {
+  for (const type of ['keydown', 'keyup'] as const) {
+    box.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, key: 'Escape', code: 'Escape', keyCode: 27, which: 27 } as KeyboardEventInit));
+  }
+}
+
+/**
+ * A date-and-time box with a calendar: a click opens the calendar, the value is
+ * typed key by key (the calendar reads what is typed), then the calendar's Apply
+ * — which is what hands the date to the site's form. Without an Apply button the
+ * calendar is closed with Escape and the person is asked to check the date.
+ */
+async function setDateTime(field: string, value: string, id?: string): Promise<{ message: string; warn: boolean }> {
+  const found = await waitFor(() => (id ? fieldById(id) : null) ?? findField(field) ?? findField(field, true), 3000);
+  if (!(found instanceof HTMLInputElement)) throw new Error(`Field "${readable(field)}" not found on the page — is the Upload Bill page open?`);
+  const box = found;
+  if (box.disabled) throw new Error(`"${readable(field)}" is locked on the site`);
+  if (norm(box.value) === value) return { message: `${readable(field)} = ${value} (already on the site)`, warn: false };
+
+  press(box);
+  await sleep(PACE.part);
+  typeKeys(box, value);
+  await sleep(PACE.part);
+  const apply = await waitFor(() => pickerApply(), 1000);
+  if (apply) press(apply);
+  else escapeKey(box);
+  await sleep(PACE.part);
+  leave(box);
+  await sleep(PACE.part);
+
+  const shown = norm(box.value);
+  const date = value.slice(0, 10);
+  flash(box, shown.startsWith(date) ? OUTLINE.filled : OUTLINE.failed, 2500);
+  if (!shown.startsWith(date)) throw new Error(`${value} was typed, but the box shows "${shown}" — pick the date in the site's calendar yourself`);
+  if (shown !== value) return { message: `${readable(field)}: ${value} was typed, the box shows "${shown}" — check the time`, warn: true };
+  // KareXpert's calendar has no Apply button: it takes what is typed (the box keeps it, as on 2026-11-11).
+  return { message: `${readable(field)} = ${value}${apply ? '' : ' (typed)'}`, warn: false };
+}
+
+/** The Bill Details boxes: by the site's ids (page structure, 2026-11-09), else by their labels. */
+const BHEL_ID = { serviceType: 'serviceType_code', qty: 'quantity', amount: 'amount', discount: 'discount_amount', remarks: 'remarks' } as const;
+const BHEL_LABEL: Record<keyof typeof BHEL_ID, string> = {
+  serviceType: '^\\s*Service\\s*Type\\s*\\*?\\s*$',
+  qty: '^\\s*Quantity\\s*\\*?\\s*$',
+  amount: '^\\s*Amount\\s*\\*?\\s*$',
+  discount: '^\\s*Discount\\s*Amount\\s*\\*?\\s*$',
+  remarks: '^\\s*Remarks\\s*\\*?\\s*$',
+};
+const BHEL_NAME: Record<keyof typeof BHEL_ID, string> = { serviceType: 'Service Type', qty: 'Quantity', amount: 'Amount', discount: 'Discount Amount', remarks: 'Remarks' };
+/** The rows added so far, listed under Bill Details. */
+const BHEL_TABLE = ['Service\\s*Type', 'Amount'];
+const BHEL_ADD = /^\s*\+?\s*Add\s*\+?\s*$/i;
+const BHEL_TOTAL = '^\\s*Total\\s*Amount\\s*(\\(\\s*Without\\s*GST\\s*\\))?\\s*:?\\s*$';
+
+function bhelBox(key: keyof typeof BHEL_ID): Control | null {
+  return fieldById(BHEL_ID[key]) ?? findField(BHEL_LABEL[key]) ?? findField(BHEL_LABEL[key], true);
+}
+
+function bhelTable(): { table: HTMLTableElement; headers: string[]; typeColumn: number } | null {
+  const t = findTable(BHEL_TABLE);
+  if (!t) return null;
+  return { ...t, typeColumn: t.headers.findIndex((h) => /service\s*type/i.test(h)) };
+}
+
+/** Its rows with data — not a "No records" line spanning the table. */
+const bhelRows = (t: { table: HTMLTableElement }) => Array.from(t.table.tBodies).flatMap((b) => Array.from(b.rows)).filter((r) => r.cells.length > 1);
+
+/**
+ * The table row of this Service Type — and these Remarks, when given (Other
+ * Unlisted Item has a row per bill section). A long remark the table shows cut
+ * short still counts.
+ */
+function bhelRowOf(serviceType: string, remarks?: string): HTMLTableRowElement | null {
+  const t = bhelTable();
+  if (!t || t.typeColumn < 0) return null;
+  const want = norm(serviceType).toLowerCase();
+  const remarksColumn = t.headers.findIndex((h) => /remarks/i.test(h));
+  const wantRemarks = norm(remarks).toLowerCase();
+  const sameRemarks = (r: HTMLTableRowElement) => {
+    if (!remarks || remarksColumn < 0) return true;
+    const shown = norm(r.cells[remarksColumn]?.textContent).replace(/\.{2,}$/, '').toLowerCase();
+    return shown === wantRemarks || (shown.length >= 8 && wantRemarks.startsWith(shown));
+  };
+  return bhelRows(t).find((r) => norm(r.cells[t.typeColumn]?.textContent).toLowerCase() === want && sameRemarks(r)) ?? null;
+}
+
+/** The amount a row shows (its "Submitted Amount", else its first "Amount" column). */
+function bhelRowAmount(row: HTMLTableRowElement): number | null {
+  const t = bhelTable();
+  if (!t) return null;
+  const col = [/submitted\s*amount/i, /^amount$/i, /amount/i].map((r) => t.headers.findIndex((h) => r.test(h) && !/discount|gst/i.test(h))).find((i) => i >= 0);
+  const text = col == null ? '' : norm(row.cells[col]?.textContent).replace(/[₹,\s]/g, '');
+  return text && Number.isFinite(Number(text)) ? Number(text) : null;
+}
+
+/** A Billing Summary box (Total Amount, Net Amount): the box under or beside its caption. */
+function bhelSummaryAmount(pattern: string): number | null {
+  const label = formLabel(pattern);
+  return label ? amountIn(controlNextTo(label, 1) ?? controlNextTo(label, 2)) : null;
+}
+
+/** The "Add" of Bill Details: the first one after its boxes — Document Upload and Payment Details have their own further down. */
+function bhelAddButton(after: Element): HTMLElement | null {
+  return Array.from(document.querySelectorAll<HTMLElement>('button, [role="button"], a, input[type="button"]'))
+    .find((el) => isVisible(el) && isAfter(after, el) && BHEL_ADD.test(textOf(el)) && !isForbidden(el)) ?? null;
+}
+
+/**
+ * Adds one Bill Details row: the Service Type (Service Item and Priority stay
+ * empty, as the client asked), Quantity where the site shows it (it hides it for
+ * Pharmacy), Amount, Discount 0 and Remarks, then "Add". A Service Type already
+ * in the table below (with these Remarks, for Other Unlisted Item) is not added twice.
+ */
+async function addBhelRow(a: Extract<PageAction, { type: 'addBhelRow' }>): Promise<{ message: string; warn: boolean; skipped?: boolean }> {
+  const select = await waitFor(() => {
+    const c = bhelBox('serviceType');
+    return c instanceof HTMLSelectElement ? c : null;
+  }, 3000);
+  if (!select) throw new StepStopped('The Bill Details "Service Type" list was not found — open the Upload Bill page on the site, then press Fill again');
+
+  const remarks = a.byRemarks ? a.remarks : undefined;
+  const what = a.byRemarks ? `${a.serviceType} "${a.remarks}"` : a.serviceType;
+  const present = bhelRowOf(a.serviceType, remarks);
+  if (present) {
+    const shown = bhelRowAmount(present);
+    return {
+      message: `a ${what} row is already in Bill Details${shown != null ? ` (${shown})` : ''} — not added again${shown != null && Math.abs(shown - a.amount) > 1 ? `; the bill's amount is ${a.amount}, check that row` : ''}`,
+      warn: true,
+      skipped: true,
+    };
+  }
+
+  const chosen = setValue(select, a.serviceType);
+  if (chosen) throw new Error(`Service Type "${a.serviceType}": ${chosen}`);
+  // The site may load the type's items and reset the boxes below it: let it settle before typing.
+  await sleep(PACE.step);
+
+  const problems: string[] = [];
+  const typeBox = (key: keyof typeof BHEL_ID, value: string): boolean => {
+    const box = bhelBox(key);
+    if (!box || box instanceof HTMLSelectElement) {
+      problems.push(`${BHEL_NAME[key]}: box not found`);
+      return false;
+    }
+    if (isLocked(box)) {
+      if (norm(box.value) === value || (value.trim() && Number(box.value) === Number(value))) return true;
+      problems.push(`${BHEL_NAME[key]}: locked on the site (it shows "${box.value}")`);
+      return false;
+    }
+    const e = enter(box, value);
+    if (e) problems.push(`${BHEL_NAME[key]}: ${e}`);
+    return !e;
+  };
+  // Quantity only where the site shows it for this type — by its id, so another "Quantity" on the page is never typed into.
+  if (fieldById(BHEL_ID.qty)) typeBox('qty', String(a.qty));
+  if (!typeBox('amount', String(a.amount))) {
+    throw new Error(`${what} was chosen, but ${problems.join('; ')} — nothing was added; enter this row yourself`);
+  }
+  const discount = bhelBox('discount');
+  if (discount && !(discount instanceof HTMLSelectElement) && amountIn(discount) !== 0) typeBox('discount', '0');
+  // Other Unlisted Item lists several section names: cut to what the box takes, as typing would.
+  const remarksBox = bhelBox('remarks');
+  const remarksText = remarksBox && !(remarksBox instanceof HTMLSelectElement) ? fit(remarksBox, a.remarks) : a.remarks;
+  typeBox('remarks', remarksText);
+  if (remarksText.length < a.remarks.length) problems.push(`Remarks: the site takes ${remarksText.length} characters, so it reads "${remarksText}"`);
+  await sleep(PACE.part);
+
+  const anchor = bhelBox('remarks') ?? bhelBox('amount') ?? select;
+  const add = bhelAddButton(anchor);
+  if (!add) throw new StepStopped('The "Add" button of Bill Details was not found after its boxes, so nothing was added (the page layout has been saved for the developer)');
+  const before = bhelTable();
+  const rowsBefore = before ? bhelRows(before).length : 0;
+  const totalBefore = bhelSummaryAmount(BHEL_TOTAL);
+  press(add);
+  const added = await waitFor(() => {
+    if (bhelRowOf(a.serviceType, remarks)) return 'row';
+    const t = bhelTable();
+    if (t && bhelRows(t).length > rowsBefore) return 'row';
+    const total = bhelSummaryAmount(BHEL_TOTAL);
+    return total != null && totalBefore != null && Math.abs(total - totalBefore - a.amount) <= 1 ? 'total' : null;
+  }, 5000);
+  if (!added) {
+    const shown = problemsShown();
+    throw new Error(`"Add" was pressed but no ${what} row appeared${shown ? ` — the site says: ${shown}` : ''}; check Bill Details on the site`);
+  }
+  const row = bhelRowOf(a.serviceType, remarks);
+  const shownAmount = row ? bhelRowAmount(row) : null;
+  if (shownAmount != null && Math.abs(shownAmount - a.amount) > 1) problems.push(`the row shows ${shownAmount}, the bill's amount is ${a.amount}`);
+  return {
+    message: `${what} ${a.amount} added${problems.length ? ` — but ${problems.join('; ')}` : ''}`,
+    warn: problems.length > 0,
+  };
+}
+
+/** Billing Summary's Total Amount against the rows filled and the bill. A shortfall of exactly what is left for the person is said, not flagged. */
+async function checkBhelTotals(rowsTotal: number, netAmount: number | null, notFilled: number): Promise<{ message: string; warn: boolean }> {
+  await sleep(PACE.part);
+  const site = bhelSummaryAmount(BHEL_TOTAL);
+  if (site == null) return { message: 'Total Amount (Billing Summary) not found on the page — compare it with the bill yourself', warn: true };
+  if (netAmount != null && Math.abs(site - netAmount) <= 1) return { message: `Total Amount ${site} = the bill's net amount ${netAmount}`, warn: false };
+  if (Math.abs(site - rowsTotal) <= 1) {
+    if (notFilled > 0) return { message: `Total Amount ${site} = the rows filled; ${notFilled} of the bill is left for you to add (listed in the panel)`, warn: true };
+    return { message: `Total Amount ${site} = the rows filled${netAmount != null ? ` (the bill's net amount is ${netAmount}: each row is rounded to the rupee)` : ''}`, warn: false };
+  }
+  return {
+    message: `Total Amount on the site is ${site}; the rows filled come to ${rowsTotal}${netAmount != null ? ` and the bill's net amount is ${netAmount}` : ''} — check the Bill Details rows`,
+    warn: true,
+  };
+}
+
+/**
+ * Where an action's row or field is, to find it again when the person asks to
+ * see it. A procedure row is known by its name on the site, so only once it
+ * was found in the list (`name`).
+ */
+function spotOf(a: PageAction, name?: string): PageSpot | null {
+  switch (a.type) {
+    case 'setField': return { kind: 'field', field: a.field, ...(a.id ? { id: a.id } : {}) };
+    case 'setCell': return { kind: 'cell', headers: a.headers, row: a.row, column: a.column };
+    case 'addTariffItem': return { kind: 'codeRow', codes: [a.code, ...(a.alternatives ?? [])] };
+    case 'addProcedure': return name ? { kind: 'procedure', name } : null;
+    case 'addCilRow': return { kind: 'cilRow', section: a.section, code: a.code, ...(a.section === 'unlisted' && a.name ? { service: a.name } : {}) };
+    case 'checkCilTotals': return { kind: 'cilTotals' };
+    case 'loadPharmacyExcel': return { kind: 'table', headers: a.headers };
+    case 'setDateTime': return { kind: 'field', field: a.field, ...(a.id ? { id: a.id } : {}) };
+    case 'addBhelRow': return { kind: 'bhelRow', serviceType: a.serviceType, ...(a.byRemarks ? { remarks: a.remarks } : {}) };
+    case 'checkBhelTotals': return { kind: 'field', field: BHEL_TOTAL };
+    default: return null;
+  }
+}
+
 export async function runActions(actions: PageAction[]): Promise<ActionResult[]> {
   const results: ActionResult[] = [];
   for (const [index, a] of actions.entries()) {
@@ -1397,21 +1837,32 @@ export async function runActions(actions: PageAction[]): Promise<ActionResult[]>
       let message: string;
       let warn = false;
       let skipped: boolean | undefined;
+      let name: string | undefined;
       switch (a.type) {
         case 'clickTab': message = await clickTab(a.text, a.next); break;
         case 'clickButton': message = await clickButton(a.text); break;
         case 'setField': message = await setField(a.field, a.value, a.id, a.calendar); break;
         case 'ensureRows': message = await ensureRows(a.headers, a.count, a.addButton); break;
         case 'setCell': message = await setCell(a.headers, a.row, a.column, a.value, a.optionMatch); break;
-        case 'addTariffItem': ({ message, warn } = await addTariffItem(a.code, a.tariff, a.qty, a.amountClaimed, a.tariffOption, a.alternatives)); break;
-        case 'addProcedure': ({ message, warn, skipped } = await addProcedure(a.code, a.units)); break;
+        case 'addTariffItem': ({ message, warn } = await addTariffItem(a.code, a.tariff, a.qty, a.amountClaimed, a.tariffOption, a.alternatives, a.moreTariffOptions)); break;
+        case 'addProcedure': ({ message, warn, skipped, name } = await addProcedure(a.code, a.units)); break;
         case 'addCilRow': ({ message, warn, skipped } = await addCilRow(a)); break;
         case 'checkCilTotals': ({ message, warn } = await checkCilTotals(a.netAmount, a.pharmacy, a.notFilled)); break;
+        case 'loadPharmacyExcel': ({ message, warn, skipped } = await loadPharmacyExcel(a)); break;
+        case 'setDateTime': ({ message, warn } = await setDateTime(a.field, a.value, a.id)); break;
+        case 'addBhelRow': ({ message, warn, skipped } = await addBhelRow(a)); break;
+        case 'checkBhelTotals': ({ message, warn } = await checkBhelTotals(a.rowsTotal, a.netAmount, a.notFilled)); break;
         default: throw new Error('Unknown action');
       }
-      results.push({ index, label: a.label, ok: true, message, ...(warn ? { warn } : {}), ...(skipped ? { skipped } : {}) });
+      const spot = spotOf(a, name);
+      results.push({ index, label: a.label, ok: true, message, ...(warn ? { warn } : {}), ...(skipped ? { skipped } : {}), ...(spot ? { spot } : {}) });
     } catch (err) {
-      results.push({ index, label: a.label, ok: false, message: err instanceof Error ? err.message : String(err), ...(err instanceof StepStopped ? { stopped: true } : {}) });
+      // A step that failed part-way may still have left its row or field to look at (show() says when it is not there).
+      const spot = spotOf(a);
+      results.push({
+        index, label: a.label, ok: false, message: err instanceof Error ? err.message : String(err),
+        ...(err instanceof StepStopped ? { stopped: true } : {}), ...(spot ? { spot } : {}),
+      });
       // Fewer results than actions tells the panel the step stopped. A tab that
       // would not open or a row that could not be added does not stop it: the
       // person may have the tab open already, and the rows that exist still fill.
@@ -1420,6 +1871,77 @@ export async function runActions(actions: PageAction[]): Promise<ActionResult[]>
     await sleep(PACE.step);
   }
   return results;
+}
+
+// ------------------------------------------------- showing a step's work
+
+/** The boxes of a table row, else its cells — what is outlined to show the row. */
+function rowParts(row: HTMLTableRowElement): HTMLElement[] {
+  const boxes = Array.from(row.querySelectorAll<HTMLElement>(CONTROL_SELECTOR)).filter(isVisible);
+  return boxes.length ? boxes : Array.from(row.cells);
+}
+
+/** What on the page holds a step's work now — looked up again, as the site may have redrawn it. */
+function spotElements(spot: PageSpot): HTMLElement[] {
+  switch (spot.kind) {
+    case 'field': {
+      const c = (spot.id ? fieldById(spot.id) : null) ?? findField(spot.field) ?? findField(spot.field, true);
+      return c ? [c] : [];
+    }
+    case 'cell': {
+      const t = findTable(spot.headers);
+      const row = t ? dataRows(t)[spot.row] : undefined;
+      const c = t && row ? cellControl(t, row, spot.column) : null;
+      return c ? [c] : [];
+    }
+    case 'codeRow': {
+      for (const code of spot.codes) {
+        const found = rowWithCode(code);
+        if (found) return rowParts(found.row);
+      }
+      return [];
+    }
+    case 'procedure': {
+      const like = rowLike(spot.name);
+      return like ? Array.from(like.row.cells) : [];
+    }
+    case 'cilRow': {
+      const { section, code, service } = spot;
+      const rows = (cilSection(section)?.rows ?? [])
+        .filter((r) => r.length === CIL_BOXES && norm(r[CIL_COL.code].value).toUpperCase() === code.toUpperCase());
+      // Several rows can carry the hospital's own code (YSSH): the one with this service.
+      const row = service ? rows.find((r) => sameText(r[CIL_COL.name], service)) : rows[0];
+      return row ?? [];
+    }
+    case 'cilTotals':
+      return [CIL_PHARMACY_LABEL, CIL_GRAND_TOTAL_LABEL].flatMap((pattern) => {
+        const label = formLabel(pattern);
+        return label ? boxesBeside(label) : [];
+      });
+    case 'table': {
+      const t = findTable(spot.headers);
+      return t ? [t.table] : [];
+    }
+    case 'bhelRow': {
+      const row = bhelRowOf(spot.serviceType, spot.remarks);
+      return row ? rowParts(row) : [];
+    }
+    default:
+      return [];
+  }
+}
+
+/**
+ * Scrolls to a step's row or field and outlines it. Nothing is clicked, typed
+ * or focused — a focused box could set off the site's own look-ups.
+ * → false when it is not on the page now (another tab is open, or it was removed).
+ */
+export function showSpot(spot: PageSpot): boolean {
+  const els = spotElements(spot).filter(isVisible);
+  if (!els.length) return false;
+  els[0].scrollIntoView({ block: 'center', behavior: 'smooth' });
+  for (const el of els) flash(el, OUTLINE.focus, 3000);
+  return true;
 }
 
 // ------------------------------------------------------- read-only helpers
@@ -1508,6 +2030,21 @@ export function describePage(probes: string[] = []): PageOutline {
       .filter((el) => !textOf(el))
       .slice(0, 60)
       .map((el) => ({ tag: el.tagName.toLowerCase(), attrs: iconWords(el), path: domPath(el).split(' < ').slice(0, 4).join(' < ') })),
+    // Hidden ones too: an "Upload Excel" button usually opens a hidden file box.
+    fileBoxes: Array.from(document.querySelectorAll<HTMLInputElement>('input[type="file"]')).slice(0, 20).map((b) => {
+      let block: Element | null = b;
+      for (let i = 0; i < 3 && block?.parentElement; i++) block = block.parentElement;
+      return {
+        accept: b.accept,
+        id: b.id,
+        name: b.getAttribute('name') || '',
+        multiple: b.multiple,
+        hidden: !isVisible(b),
+        attrs: attrsOf(b),
+        path: domPath(b).split(' < ').slice(0, 5).join(' < '),
+        near: Array.from(block?.querySelectorAll<HTMLElement>('button, a, label, [role="button"]') ?? []).map((e) => textOf(e)).filter(Boolean).slice(0, 6).join(' | '),
+      };
+    }),
     frames: document.querySelectorAll('iframe, frame').length,
     shadowHosts: Array.from(document.querySelectorAll('*')).filter((el) => el.shadowRoot).length,
   };

@@ -66,10 +66,10 @@ for (const file of ['FillPilot-Start.cmd', 'FillPilot-Stop.cmd', 'README.txt']) 
 // 5. Nothing private may be in it, and nothing that is not a signed program may run from it.
 const all = walk(OUT);
 const ours = (f) => !/[\\/]node_modules[\\/]/.test(f);
-// Spreadsheets are HIS exports or SPDCL files (patient data) — except SPDCL's blank template.
-const SPDCL_TEMPLATE = path.join('app', 'backend', 'src', 'claims', 'spdcl-template.xlsx');
+// Spreadsheets are HIS exports or upload files (patient data) — except the sites' blank templates.
+const TEMPLATES = ['spdcl-template.xlsx', 'tgnpdcl-pharmacy-template.xlsx', 'tgtransco-template.xlsx'].map((name) => path.join('app', 'backend', 'src', 'claims', name));
 const private_ = all.filter((f) => /\.pdf$/i.test(f) || /(^|[\\/])\.env(\.|$)/.test(f) || /\.pem$/i.test(f)
-  || (ours(f) && /\.(xlsx|xls|csv)$/i.test(f) && path.relative(OUT, f) !== SPDCL_TEMPLATE)
+  || (ours(f) && /\.(xlsx|xls|csv)$/i.test(f) && !TEMPLATES.includes(path.relative(OUT, f)))
   || (ours(f) && (/[\\/](storage|storage-test|test-fixtures)[\\/]/.test(f) || /\.log$/i.test(f))));
 if (private_.length) {
   for (const f of private_) log(`PRIVATE FILE IN PACKAGE: ${path.relative(OUT, f)}`);
@@ -82,5 +82,5 @@ if (config.mode !== 'reader') throw new Error('The packaged extension is not the
 
 log(`Programs in the package: ${programs.join(', ')}`);
 log(`Extension: ${manifest.name} ${manifest.version}, ${config.mode} mode, calls ${config.apiBase}, sites ${config.sites.map((s) => s.origin).join(', ')}`);
-log(`Size: ${megabytes(all)} MB in ${all.length} files — no PDFs, spreadsheets (but the SPDCL template), .env files, keys, logs or test data.`);
+log(`Size: ${megabytes(all)} MB in ${all.length} files — no PDFs, spreadsheets (but the sites' blank templates), .env files, keys, logs or test data.`);
 log(`Ready: ${OUT}`);

@@ -14,10 +14,13 @@
     "test-kv-extractor": "node scripts/test-kv-extractor.js",
     "test-matcher": "node scripts/test-matcher.js",
     "test-yashoda": "node scripts/test-yashoda.js",
+    "test-user-scope": "node scripts/test-user-scope.js",
     "bill-accuracy": "node scripts/bill-accuracy.js",
     "test-spdcl": "node scripts/test-spdcl.js",
     "spdcl-compare": "node scripts/spdcl-compare.js",
-    "test-unit": "node scripts/test-normalize.js && node scripts/test-kv-extractor.js && node scripts/test-matcher.js && node scripts/test-yashoda.js && node scripts/test-spdcl.js",
+    "test-tgtransco": "node scripts/test-tgtransco.js",
+    "tgtransco-compare": "node scripts/tgtransco-compare.js",
+    "test-unit": "node scripts/test-normalize.js && node scripts/test-kv-extractor.js && node scripts/test-matcher.js && node scripts/test-yashoda.js && node scripts/test-spdcl.js && node scripts/test-tgtransco.js && node scripts/test-user-scope.js",
     "test-routes": "node --env-file=.env scripts/test-routes.js"
   },
   "engines": {

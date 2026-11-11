@@ -12,6 +12,7 @@ import type { PmjayClaim } from '../../../web/projects/shared/src/api-types';
 import type { ActionResult, PageAction } from '../../../web/projects/shared/src/page-contract';
 import { api, messageOf } from './api';
 import { pmjayAdded, pmjaySession } from './bill-session';
+import { BillChecks, ResultLine, useBillPdfs } from './CheckList';
 import { BoltIcon, CheckIcon, ShieldIcon, StopIcon, UploadIcon } from './Icons';
 import { ActiveTab, bridge } from './page-bridge';
 import { PMJAY_PROBES, buildPmjayActions, pmjayAuditLabel } from './pmjay-plan';
@@ -45,6 +46,8 @@ export function PmjayView({ tab, onError }: { tab: ActiveTab; onError: (message:
   /** How many this fill is adding — fixed at the start, for the progress bar. */
   const [total, setTotal] = useState(0);
   const stopRequested = useRef(false);
+  /** The PDFs just read — a check opens the bill at its page. */
+  const pdfs = useBillPdfs();
 
   useEffect(() => {
     (async () => {
@@ -81,6 +84,7 @@ export function PmjayView({ tab, onError }: { tab: ActiveTab; onError: (message:
       const fresh = await api.readPmjayBills(files);
       await pmjaySession.save(fresh);
       await forgetAdded();
+      pdfs.hold(files, fresh.documents);
       setClaim(fresh);
       setResults(null);
       setEnded('');
@@ -98,6 +102,7 @@ export function PmjayView({ tab, onError }: { tab: ActiveTab; onError: (message:
   async function clear() {
     await pmjaySession.clear().catch(() => undefined);
     await forgetAdded();
+    pdfs.release();
     setClaim(null);
     setResults(null);
     setEnded('');
@@ -252,12 +257,7 @@ export function PmjayView({ tab, onError }: { tab: ActiveTab; onError: (message:
                 </button>
               )}
             </div>
-            {checksOpen && (
-              <div className="mt-sm">
-                {errors.map((c) => <div key={c.message} className="warn-line bad">✗ {c.message}</div>)}
-                {warnings.map((c) => <div key={c.message} className={`warn-line${c.level === 'info' ? ' muted' : ''}`}>{c.level === 'info' ? 'ℹ' : '⚠'} {c.message}</div>)}
-              </div>
-            )}
+            {checksOpen && <BillChecks checks={claim.checks} pdfs={pdfs} />}
           </div>
         )}
 
@@ -304,11 +304,7 @@ export function PmjayView({ tab, onError }: { tab: ActiveTab; onError: (message:
               {results && results.length > 0 && (
                 <details className="preview results" open={failed > 0 || toCheck > 0}>
                   <summary>Result: {results.length - failed} done{toCheck ? ` (${toCheck} to check)` : ''}{failed ? `, ${failed} failed` : ''}</summary>
-                  {results.map((r) => (
-                    <div key={r.index} className={`small ${r.ok ? (r.warn ? 'warn-text' : '') : 'bad'}`}>
-                      {r.ok ? (r.warn ? '⚠' : '✓') : '✗'} {r.label}{r.ok && !r.warn ? '' : ` — ${r.message}`}
-                    </div>
-                  ))}
+                  {results.map((r) => <ResultLine key={r.index} result={r} tabId={tab.tabId} />)}
                 </details>
               )}
               {ended && <div className="warn-line">{ended}</div>}

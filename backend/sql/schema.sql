@@ -155,3 +155,20 @@ ALTER TABLE fill_sessions ADD COLUMN IF NOT EXISTS page_outline JSONB;
 -- 2026-10-09: with KEEP_PDF=false the PDF is deleted once its data has been
 -- read; the document row (extracted data) stays until its retention date.
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS file_kept BOOLEAN NOT NULL DEFAULT TRUE;
+
+-- 2026-11-11: the hospital's units. Every user belongs to one (the Main Admin
+-- may have none); a Unit Admin sees and manages only their unit, the Main Admin
+-- ('Admin') all of them. One server and one list of approved websites for all.
+CREATE TABLE IF NOT EXISTS units (
+  code        VARCHAR(10)  PRIMARY KEY,
+  name        VARCHAR(80)  NOT NULL,
+  created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+INSERT INTO units (code, name) VALUES
+  ('HTC', 'Hitech City'), ('SMJ', 'Somajiguda'), ('SEC', 'Secunderabad'), ('MLK', 'Malakpet')
+  ON CONFLICT (code) DO NOTHING;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS unit_code VARCHAR(10) REFERENCES units (code);
+CREATE INDEX IF NOT EXISTS users_unit_idx ON users (unit_code);
+-- The role check of the CREATE above allows Admin and User only: replaced here (re-run on every start, harmless).
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('Admin', 'UnitAdmin', 'User'));

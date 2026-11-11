@@ -2,7 +2,7 @@
 // can collide ("f1" in two iframes), so they are made unique here as
 // "<frameId>:<ref>" and split again when addressing a frame.
 import type {
-  ActionResult, FieldDescriptor, FillAssignment, FillOutcome, PageAction, PageAgent, PageIdentity, PageOutline,
+  ActionResult, FieldDescriptor, FillAssignment, FillOutcome, PageAction, PageAgent, PageIdentity, PageOutline, PageSpot,
 } from '../../../web/projects/shared/src/page-contract';
 
 export interface ActiveTab {
@@ -97,6 +97,17 @@ export const bridge = {
       args: [actions],
     });
     return (result?.result as ActionResult[] | undefined) ?? [];
+  },
+
+  /** Scrolls the page to a step's row or field and outlines it. → false when it is not on the page now. */
+  async show(tabId: number, spot: PageSpot): Promise<boolean> {
+    await ensureAgent(tabId);
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      func: (s: PageSpot) => globalThis.__pdfFormAssistant?.show(s) ?? false,
+      args: [spot],
+    });
+    return result?.result === true;
   },
 
   async readIdentity(tabId: number): Promise<PageIdentity> {

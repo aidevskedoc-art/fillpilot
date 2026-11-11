@@ -19,7 +19,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string; token?: string }
       target: { tabId: sender.tab.id, frameIds: [sender.frameId ?? 0] },
       world: 'MAIN',
       func: (token: string) => {
-        const forbidden = /\b(save|submit|remove|delete|request|print|cancel|log\s*out|sign\s*out|upload|download)\b/i;
+        const forbidden = /\b(save|submit|remove|delete|request|print|cancel|log\s*out|sign\s*out|upload|download|draft|accept)\b/i;
         const el = document.querySelector(`[data-fillpilot-click="${token}"]`);
         if (!(el instanceof HTMLElement)) return 'missing';
         el.removeAttribute('data-fillpilot-click');

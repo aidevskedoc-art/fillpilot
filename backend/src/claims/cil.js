@@ -6,7 +6,9 @@
 //   CGHS List Items        one row per CIL code (CC008, LB037…), the quantities
 //                          of all its bill lines added up: the site fills in the
 //                          item name from the code and prices it; the bill's
-//                          service names go in Remarks
+//                          service names go in Remarks. A line charged under
+//                          several codes ("LB092+93+94") counts for each
+//                          code, at its share of the line's amount
 //   Unlisted Procedures    code, service name, quantity and the bill's rate for:
 //                          the hospital's own code (YSSH), the codes in
 //                          UNLISTED_CODES (BC002, BC006), and room rent (code
@@ -18,6 +20,7 @@
 // it is only compared.
 
 const { normLabel } = require('../text/labels');
+const { addSummaryIssues } = require('./summary-issues');
 
 const round2 = (n) => Math.round(n * 100) / 100;
 const same = (a, b) => a != null && b != null && Math.abs(a - b) < 0.011;
@@ -53,23 +56,24 @@ function siteDate(iso) {
  */
 function buildCilClaim({ final, summary }) {
   const checks = [];
-  const add = (level, message) => checks.push({ level, message });
+  // at: { doc: 'final' | 'summary', page } — where on the bill; the panel opens the PDF there.
+  const add = (level, message, at) => checks.push({ level, message, ...(at ? { at } : {}) });
 
-  for (const issue of final.issues || []) add(issue.level, `Final bill: ${issue.message}`);
-  for (const issue of summary?.issues || []) add(issue.level, `Summary bill: ${issue.message}`);
+  for (const issue of final.issues || []) add(issue.level, `Final bill: ${issue.message}`, { doc: 'final', page: issue.page ?? null });
+  addSummaryIssues(add, final, summary);
   if (summary && final.patient?.ipNo && summary.patient?.ipNo && final.patient.ipNo !== summary.patient.ipNo) {
     add('error', `The bills are for different patients: IP ${final.patient.ipNo} (final) vs IP ${summary.patient.ipNo} (summary)`);
   }
   if (summary && !same(final.totals.grandTotal, summary.totals.gross)) {
-    add('error', `Grand total differs: final bill ${final.totals.grandTotal} vs summary bill ${summary.totals.gross}`);
+    add('error', `Grand total differs: final bill ${final.totals.grandTotal} vs summary bill ${summary.totals.gross}`, { doc: 'final', page: final.grandTotalPage ?? null });
   }
   const company = summary?.patient?.company;
   if (company && !/COAL\s*INDIA/i.test(company)) {
-    add('warning', `The summary bill is made out to "${company}", not Coal India — check these are the right bills`);
+    add('warning', `The summary bill is made out to "${company}", not Coal India — check these are the right bills`, { doc: 'summary', page: 1 });
   }
   const billDate = siteDate(summary?.patient?.discharge?.date);
   if (!summary) add('warning', 'No summary bill selected — Bill No. and Bill Date are left empty');
-  else if (!billDate) add('warning', 'Discharge date not read from the summary bill — Bill Date is left empty');
+  else if (!billDate) add('warning', 'Discharge date not read from the summary bill — Bill Date is left empty', { doc: 'summary', page: 1 });
 
   const cghs = [];
   const unlisted = [];
@@ -137,6 +141,15 @@ function buildCilClaim({ final, summary }) {
             toManual(where, item, 'Doctor fees have no code — enter them on the site yourself');
           } else {
             toManual(where, item, 'No code on the bill');
+          }
+          continue;
+        }
+        if (item.codeParts) {
+          // Package codes charged as one line ("LB092+93+94"): a row for each, at its share of the line.
+          const combined = `${item.code} on the bill is one line for ${item.codeParts.map((p) => p.code).join(', ')} — "${item.description}"`;
+          for (const part of item.codeParts) {
+            const issues = [...(item.issues || []), combined, ...(part.note ? [part.note] : [])];
+            addRow(where, { ...item, rate: null, amount: part.amount, issues }, part.code, UNLISTED_CODES.has(part.code));
           }
           continue;
         }

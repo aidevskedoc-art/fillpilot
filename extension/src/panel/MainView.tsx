@@ -6,7 +6,10 @@ import { api, messageOf } from './api';
 import { ActiveTab, bridge } from './page-bridge';
 import { ReviewRow, toRow } from './review-model';
 import { GuideOverlay } from './Guide';
-import { ArrowRightIcon, BoltIcon, InfoIcon, LogOutIcon, MoonIcon, RefreshIcon, ScanIcon, SettingsIcon, SheetIcon, ShieldIcon, SunIcon } from './Icons';
+import {
+  ArrowRightIcon, BoltIcon, CheckIcon, FileTextIcon, GlobeIcon, InfoIcon, LogOutIcon, MoonIcon, PillIcon, RefreshIcon, ScanIcon, SettingsIcon, SheetIcon,
+  ShieldIcon, SunIcon,
+} from './Icons';
 import { Logo } from './Logo';
 import { Settings } from './Settings';
 import { TgnpdclView } from './TgnpdclView';
@@ -15,7 +18,11 @@ import { PmjayView } from './PmjayView';
 import { isPmjayPage } from './pmjay-plan';
 import { CilView } from './CilView';
 import { isCilPage } from './cil-plan';
+import { BhelView } from './BhelView';
+import { isBhelPage } from './bhel-plan';
 import { SpdclView } from './SpdclView';
+import { TgnpdclPharmacyView } from './TgnpdclPharmacyView';
+import { TgTranscoView } from './TgTranscoView';
 import { Theme, applyTheme, savedTheme } from './theme';
 import { UploadPdfs } from './UploadPdfs';
 
@@ -32,8 +39,16 @@ const hostOf = (origin: string) => {
   }
 };
 
-/** The bill sites (TGNPDCL, PM-JAY, Coal India): FillPilot works there in bill entry only, never the any-PDF mode. */
-const isBillSite = (url: URL | null) => Boolean(url && /(^|\.)(tgnpdcl\.com|provider\.nha\.gov\.in|cilbpa\.utiitsl\.com)$/i.test(url.hostname));
+/** The files the "Excel & PDF" tab makes, listed one under the other. */
+type Tool = 'spdcl' | 'tgnpdcl-pharmacy' | 'tgtransco';
+const TOOLS: { key: Tool; name: string; what: string; Icon: typeof SheetIcon }[] = [
+  { key: 'spdcl', name: 'SPDCL', what: 'Claim Excel from the two HIS bills', Icon: SheetIcon },
+  { key: 'tgnpdcl-pharmacy', name: 'TGNPDCL', what: 'Pharmacy upload Excel from the pharmacy bill', Icon: PillIcon },
+  { key: 'tgtransco', name: 'TG Transco', what: 'Bill Excel in their own template', Icon: FileTextIcon },
+];
+
+/** The bill sites (TGNPDCL, PM-JAY, Coal India, BHEL): FillPilot works there in bill entry only, never the any-PDF mode. */
+const isBillSite = (url: URL | null) => Boolean(url && /(^|\.)(tgnpdcl\.com|provider\.nha\.gov\.in|cilbpa\.utiitsl\.com|bhel\.karexpert\.com)$/i.test(url.hostname));
 type RowFilter = 'all' | 'review' | 'matched' | 'unmatched';
 
 export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
@@ -55,8 +70,13 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [theme, setTheme] = useState<Theme>(savedTheme);
   const [settings, setSettings] = useState(false);
   const [guide, setGuide] = useState(false);
-  /** The SPDCL Excel tool is open: it needs no website, so it shows in place of the site's view. */
-  const [spdcl, setSpdcl] = useState(false);
+  /**
+   * The panel's tab: the websites to fill, or the files made from the bills (the SPDCL
+   * Excel — it needs no website). Both stay mounted, so neither loses its work on a switch.
+   */
+  const [mode, setMode] = useState<'websites' | 'files'>('websites');
+  /** Which file the "Excel & PDF" tab makes: the SPDCL claim Excel, TGNPDCL's pharmacy upload Excel, or TG Transco's bill Excel. */
+  const [tool, setTool] = useState<Tool>('spdcl');
   const [copied, setCopied] = useState('');
   const closeGuide = useCallback(() => setGuide(false), []);
 
@@ -298,7 +318,7 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
           <Logo />
           <div className="min-w-0">
             <div className="title title-grad">FillPilot</div>
-            <div className="muted small truncate">{user.fullName}</div>
+            <div className="muted small truncate">{user.fullName}{user.unit ? ` · ${user.unit}` : ''}</div>
           </div>
         </div>
         <div className="row-inline">
@@ -310,6 +330,17 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
           <button className="btn-icon" onClick={logout} title="Sign out" aria-label="Sign out"><LogOutIcon /></button>
         </div>
       </header>
+
+      <nav className="mode-bar" aria-label="What FillPilot does">
+        <div className="segmented mode-tabs" role="tablist">
+          <button role="tab" aria-selected={mode === 'websites'} className={mode === 'websites' ? 'active' : ''} onClick={() => setMode('websites')}>
+            <GlobeIcon size={14} /> Websites
+          </button>
+          <button role="tab" aria-selected={mode === 'files'} className={mode === 'files' ? 'active' : ''} onClick={() => setMode('files')}>
+            <SheetIcon size={14} /> Excel &amp; PDF
+          </button>
+        </div>
+      </nav>
 
       {settings && (
         <div className="section">
@@ -326,7 +357,7 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
         </div>
       )}
 
-      {!spdcl && (
+      <div className="mode-pane" role="tabpanel" aria-label="Websites" hidden={mode !== 'websites'}>
       <section className="section">
         <div className="label">Website</div>
         {siteState === 'ready' && (
@@ -369,20 +400,16 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
           </>
         )}
         {siteState === 'no-tab' && <p className="muted small">No active tab.</p>}
-        <button type="button" className="btn btn-secondary btn-sm btn-block mt" onClick={() => setSpdcl(true)}>
-          <SheetIcon size={14} /> SPDCL Excel from the HIS files
-        </button>
       </section>
-      )}
 
-      {spdcl ? (
-        <SpdclView onClose={() => setSpdcl(false)} onError={setError} />
-      ) : siteState === 'ready' && tab && isTgnpdclBillPage(tab.url) ? (
+      {siteState === 'ready' && tab && isTgnpdclBillPage(tab.url) ? (
         <TgnpdclView tab={tab} onError={setError} />
       ) : siteState === 'ready' && tab && isPmjayPage(tab.url) && api.mode !== 'reader' ? (
         <PmjayView tab={tab} onError={setError} />
       ) : siteState === 'ready' && tab && isCilPage(tab.url) && api.mode !== 'reader' ? (
         <CilView tab={tab} onError={setError} />
+      ) : siteState === 'ready' && tab && isBhelPage(tab.url) && api.mode !== 'reader' ? (
+        <BhelView tab={tab} onError={setError} />
       ) : api.mode === 'reader' ? (
         <section className="section">
           <div className="card card-pad">
@@ -399,8 +426,8 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
             <div className="strong">{siteState === 'ready' ? 'Open the patient\'s bill on this site' : 'Open the website and enable it'}</div>
             <div className="muted small mt-sm">
               {siteState === 'ready'
-                ? 'FillPilot switches to bill entry on the bill page: TGNPDCL medical bill entry, the PM-JAY case, or the Coal India claim.'
-                : 'Go to TGNPDCL, PM-JAY or Coal India and press Enable above for that site. On the bill page FillPilot switches to bill entry.'}
+                ? 'FillPilot switches to bill entry on the bill page: TGNPDCL medical bill entry, the PM-JAY case, the Coal India claim, or BHEL\'s Upload Bill screen.'
+                : 'Go to TGNPDCL, PM-JAY, Coal India or BHEL and press Enable above for that site. On the bill page FillPilot switches to bill entry.'}
             </div>
           </div>
         </section>
@@ -555,6 +582,31 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
       )}
       </>
       )}
+      </div>
+
+      <div className="mode-pane" role="tabpanel" aria-label="Excel and PDF" hidden={mode !== 'files'}>
+        <div className="tool-list" role="tablist" aria-label="File to make" aria-orientation="vertical">
+          {TOOLS.map(({ key, name, what, Icon }) => (
+            <button key={key} type="button" role="tab" aria-selected={tool === key} className={`tool-item${tool === key ? ' active' : ''}`} onClick={() => setTool(key)}>
+              <span className="tool-icon"><Icon size={15} /></span>
+              <span className="tool-text">
+                <span className="tool-name">{name}</span>
+                <span className="tool-what">{what}</span>
+              </span>
+              <span className="tool-mark">{tool === key && <CheckIcon size={15} />}</span>
+            </button>
+          ))}
+        </div>
+        <div className="mode-pane" role="tabpanel" aria-label="SPDCL claim Excel" hidden={tool !== 'spdcl'}>
+          <SpdclView onError={setError} />
+        </div>
+        <div className="mode-pane" role="tabpanel" aria-label="TGNPDCL pharmacy Excel" hidden={tool !== 'tgnpdcl-pharmacy'}>
+          <TgnpdclPharmacyView onError={setError} />
+        </div>
+        <div className="mode-pane" role="tabpanel" aria-label="TG Transco Excel" hidden={tool !== 'tgtransco'}>
+          <TgTranscoView onError={setError} />
+        </div>
+      </div>
 
       {guide && <GuideOverlay onClose={closeGuide} />}
     </div>

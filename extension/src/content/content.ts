@@ -5,7 +5,7 @@
 import type { PageAgent } from '../../../web/projects/shared/src/page-contract';
 import { clearRefs, scanPage } from './scan';
 import { fillFields, highlightField } from './fill';
-import { describePage, readIdentity, runActions } from './actions';
+import { describePage, readIdentity, runActions, showSpot } from './actions';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -19,6 +19,7 @@ globalThis.__pdfFormAssistant = {
   highlight: (ref) => highlightField(ref),
   clear: () => clearRefs(),
   runActions: (actions) => runActions(actions),
+  show: (spot) => showSpot(spot),
   readIdentity: () => readIdentity(),
   describePage: (probes) => describePage(probes),
 };

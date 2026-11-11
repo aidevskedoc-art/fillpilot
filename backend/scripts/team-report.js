@@ -1,7 +1,9 @@
-// npm run team-report -- [from] [to] — the dashboard's Team report as a CSV
-// file, without the dashboard: per person, bills read per site, PDFs, pages,
-// fills. Dates are YYYY-MM-DD, both days included; by default this month so far.
+// npm run team-report -- [from] [to] [unit] — the dashboard's Team report as a
+// CSV file, without the dashboard: per person, bills read per site, PDFs,
+// pages, fills. Dates are YYYY-MM-DD, both days included; by default this month
+// so far. unit (HTC, SMJ, SEC, MLK): only that unit's people; by default all.
 //   npm.cmd run team-report -- 2026-10-01 2026-10-31
+//   npm.cmd run team-report -- 2026-10-01 2026-10-31 SMJ
 // The file goes to backend/reports/ (gitignored).
 require('dotenv').config();
 const fs = require('fs');
@@ -25,28 +27,29 @@ function midnight(text, name, addDays = 0) {
   const from = midnight(fromText, 'From');
   const to = midnight(toText, 'To', 1); // the whole last day
   if (from >= to) throw new Error(`From (${fromText}) must not be after To (${toText})`);
+  const unit = process.argv[4] ? process.argv[4].trim().toUpperCase() : null;
 
-  const { rows } = await teamReport(from, to);
+  const { rows } = await teamReport(from, to, unit);
 
-  const head = ['Person', 'Username', 'TGNPDCL', 'PM-JAY', 'Coal India', 'Bills', 'PDFs', 'Pages', 'Other PDFs', 'Fills', 'Steps done', 'Failed', 'Last active'];
+  const head = ['Person', 'Username', 'Unit', 'TGNPDCL', 'PM-JAY', 'Coal India', 'BHEL', 'Bills', 'PDFs', 'Pages', 'Other PDFs', 'Fills', 'Steps done', 'Failed', 'Last active'];
   const lines = rows.map((u) => [
-    u.fullName, u.username, u.bills.tgnpdcl, u.bills.pmjay, u.bills.cil, u.bills.total, u.pdfs, u.pages, u.uploads,
+    u.fullName, u.username, u.unit ?? '', u.bills.tgnpdcl, u.bills.pmjay, u.bills.cil, u.bills.bhel, u.bills.total, u.pdfs, u.pages, u.uploads,
     u.fills, u.stepsDone, u.stepsFailed, u.lastActive ? new Date(u.lastActive).toLocaleString('en-IN') : 'Never',
   ]);
   const cell = (v) => `"${String(v).replace(/"/g, '""')}"`;
   const csv = [head, ...lines].map((row) => row.map(cell).join(',')).join('\r\n');
   const dir = path.join(__dirname, '..', 'reports');
   fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `FillPilot-team-report_${fromText}_to_${toText}.csv`);
+  const file = path.join(dir, `FillPilot-team-report_${unit ? `${unit}_` : ''}${fromText}_to_${toText}.csv`);
   fs.writeFileSync(file, `﻿${csv}`); // the BOM makes Excel read it as UTF-8
 
   const sum = (f) => rows.reduce((n, r) => n + f(r), 0);
-  console.log(`\nFillPilot team report, ${fromText} to ${toText}\n`);
+  console.log(`\nFillPilot team report${unit ? `, unit ${unit}` : ''}, ${fromText} to ${toText}\n`);
   console.table(rows.map((u) => ({
-    Person: u.fullName, TGNPDCL: u.bills.tgnpdcl, 'PM-JAY': u.bills.pmjay, 'Coal India': u.bills.cil,
+    Person: u.fullName, Unit: u.unit ?? '', TGNPDCL: u.bills.tgnpdcl, 'PM-JAY': u.bills.pmjay, 'Coal India': u.bills.cil, BHEL: u.bills.bhel,
     PDFs: u.pdfs, Fills: u.fills, Failed: u.stepsFailed,
   })));
-  console.log(`Bills read: ${sum((r) => r.bills.total)} (TGNPDCL ${sum((r) => r.bills.tgnpdcl)}, PM-JAY ${sum((r) => r.bills.pmjay)}, Coal India ${sum((r) => r.bills.cil)})`);
+  console.log(`Bills read: ${sum((r) => r.bills.total)} (TGNPDCL ${sum((r) => r.bills.tgnpdcl)}, PM-JAY ${sum((r) => r.bills.pmjay)}, Coal India ${sum((r) => r.bills.cil)}, BHEL ${sum((r) => r.bills.bhel)})`);
   console.log(`PDFs: ${sum((r) => r.pdfs)} (${sum((r) => r.pages)} pages) · Fills: ${sum((r) => r.fills)} · People who used it: ${rows.filter((r) => r.bills.total || r.fills || r.uploads).length} of ${rows.length}`);
   console.log(`\nSaved: ${file}`);
   await db.pool.end();

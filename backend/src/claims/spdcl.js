@@ -286,23 +286,39 @@ function parsePharmacyBill(rows) {
   };
 }
 
-// ── the SPDCL rows ───────────────────────────────────────────────────────
+// ── dated rows (SPDCL and TG Transco) ────────────────────────────────────
 
 const PER_DAY = new Set(['day', 'visit', 'unit']);
 
 /** "130 007" → "130007": IP numbers compared as digits and letters only. */
 const ipKey = (ip) => String(ip ?? '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
 
-/**
- * final: parseFinalBill(); pharmacy: parsePharmacyBill() or null.
- * admissionDate: "dd/mm/yyyy" the person typed, or null for the earliest date on the bills.
- * → { patient, tariffType, admissionDate, admissionAssumed, lastDate, stayDays, rows, heads, totals, checks }
- */
-function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffType = 'EHS' }) {
+/** A list of checks that keeps each message once. */
+function checkList() {
   const checks = [];
   const add = (level, message) => {
     if (!checks.some((c) => c.message === message)) checks.push({ level, message });
   };
+  return { checks, add };
+}
+
+/**
+ * The dating both Excel claims share (SPDCL, TG Transco — the rules at the top
+ * of this file): the final bill's lines and the pharmacy bill's items → rows
+ * with a day each. What differs between the sites comes in as options:
+ *   site            the site's name, for the checks ("SPDCL")
+ *   headOf(name)    a final-bill section → { head, known }
+ *   heads           { icu, room, pharmacy, pharmacyReturns }: the heads the rules need
+ *   repeatsNextDay  the same undated item again in a section goes on the next day (SPDCL), or on the same day
+ *   pharmacyRate(item)  the Rate of a pharmacy row (default: the bill's price)
+ *   undatedDay(section) the day for a section's undated lines: a day, null (no date), undefined (admission)
+ *   add(level, message) where the checks go
+ * → { rows (each with its day), admission, assumed, earliest, latest, stayDays, heads, totals }
+ */
+function buildDailyRows({
+  final, pharmacy = null, admissionDate = null, site, headOf: headFor, heads: HEADS, add,
+  repeatsNextDay = true, pharmacyRate = (item) => item.price, undatedDay = () => undefined,
+}) {
   for (const issue of final.issues || []) add(issue.level, `Final bill: ${issue.message}`);
   for (const issue of pharmacy?.issues || []) add(issue.level, `Pharmacy bill: ${issue.message}`);
 
@@ -333,12 +349,19 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
   const clean = (item) => item.count != null && Number.isInteger(item.count) && item.count > 0
     && item.rate != null && same(round2(item.count * item.rate), item.amount);
 
+  // "1 Unit(s) X" with no rate printed: the rate is the amount ÷ the count, when that comes out in whole paise.
+  const withRate = (item) => {
+    if (item.rate != null || item.amount == null || !Number.isInteger(item.count) || item.count < 1) return item;
+    const rate = round2(item.amount / item.count);
+    return Math.abs(round2(rate * item.count) - item.amount) < 0.005 ? { ...item, rate } : item;
+  };
+
   // Bed days: ICU first, then room rent, back to back from admission.
-  const sections = final.sections.map((s) => ({ ...s, ...headOf(s.name) }));
+  const sections = final.sections.map((s) => ({ ...s, ...headFor(s.name), items: s.items.map(withRate) }));
   const bedLines = (head) => sections.filter((s) => s.head === head)
     .flatMap((s) => s.items.filter((i) => clean(i) && i.unit === 'day'));
-  const icuLines = bedLines(HEAD.icu);
-  const roomLines = bedLines(HEAD.room);
+  const icuLines = bedLines(HEADS.icu);
+  const roomLines = bedLines(HEADS.room);
   const starts = new Map();
   let cursor = admission;
   for (const line of [...icuLines, ...roomLines]) {
@@ -353,11 +376,7 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
   }
 
   const rows = [];
-  const late = [];
-  const push = (row) => {
-    rows.push(row);
-    if (row.day != null && latest != null && row.day > latest && !late.includes(row.description)) late.push(row.description);
-  };
+  const push = (row) => rows.push(row);
   const row = (head, item, day, rate, qty, section) => ({
     head,
     code: item.code ?? null,
@@ -372,19 +391,22 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
 
   let finalPharmacy = null;
   for (const section of sections) {
-    if (section.head === HEAD.pharmacy) {
+    if (section.head === HEADS.pharmacy) {
       // The final bill has pharmacy as one total; the pharmacy bill has its items.
       finalPharmacy = round2((finalPharmacy || 0) + section.items.reduce((s, i) => s + (i.amount || 0), 0));
       continue;
     }
-    if (!section.known) add('warning', `Section "${section.name}" is new to FillPilot — its lines are entered as ${HEAD.investigations}. Check the Service_Type.`);
+    if (!section.known) add('warning', `Section "${section.name}" is new to FillPilot — its lines are entered as ${section.head.trim()}. Check the Service_Type.`);
+    // Undated lines start on admission, or on the section's own day (TG Transco: surgery and implants on the surgery date).
+    const own = undatedDay(section);
+    const first = own === undefined ? admission : own;
     const seen = new Map();
     for (const item of section.items) {
-      // The same item again in this section, without a date of its own, goes on the next day.
+      // The same item again in this section, without a date of its own: the next day (SPDCL) or the same day.
       const key = `${item.code ?? ''}|${item.description.toUpperCase()}`;
       const repeat = seen.get(key) ?? 0;
       seen.set(key, repeat + 1);
-      const from = item.date ?? (admission == null ? null : admission + repeat);
+      const from = item.date ?? (first == null ? null : first + (repeatsNextDay ? repeat : 0));
       const plus = (day, n) => (day == null ? null : day + n);
 
       if (starts.has(item)) {
@@ -392,7 +414,7 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
         continue;
       }
       if (clean(item) && PER_DAY.has(item.unit)) {
-        const start = item.date ?? admission;
+        const start = item.date ?? first;
         for (let n = 0; n < item.count; n++) push(row(section.head, item, plus(start, n), item.rate, 1, section.name));
         continue;
       }
@@ -403,7 +425,7 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
         }
         // Spread over the stay: 37 times over 7 days → 6, 6, 5, 5, 5, 5, 5.
         const days = Math.min(item.count, stayDays);
-        const start = item.date ?? admission;
+        const start = item.date ?? first;
         const base = Math.floor(item.count / days);
         const extra = item.count % days;
         for (let n = 0; n < days; n++) push(row(section.head, item, plus(start, n), item.rate, base + (n < extra ? 1 : 0), section.name));
@@ -428,40 +450,30 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
   let roundingGap = 0;
   if (pharmacy) {
     pharmacyIssued = 0;
-    let fractional = false;
     for (const item of pharmacy.items) {
-      const head = item.returned ? HEAD.pharmacyReturns : HEAD.pharmacy;
+      const head = item.returned ? HEADS.pharmacyReturns : HEADS.pharmacy;
       const day = item.date ?? admission;
       if (item.date == null) add('warning', `Pharmacy "${item.description}": no indent date — dated ${dateText(admission) ?? '(none)'}`);
-      if (!Number.isInteger(item.qty)) fractional = true;
-      const out = row(head, { code: null, description: item.description }, day, item.price, item.qty, 'Pharmacy');
+      const out = row(head, { code: null, description: item.description }, day, pharmacyRate(item), item.qty, 'Pharmacy');
       push(out);
       const charged = item.value ?? out.amount;
       if (item.returned) pharmacyReturned = round2(pharmacyReturned + charged);
       else pharmacyIssued = round2(pharmacyIssued + charged);
       roundingGap = round2(roundingGap + (charged - out.amount) * (item.returned ? -1 : 1));
     }
-    if (pharmacy.items.some((i) => i.returned)) {
-      add('warning', `The pharmacy bill has returns (${pharmacyReturned}) — entered under "${HEAD.pharmacyReturns}". Check how SPDCL wants returns.`);
-    }
-    if (fractional) add('warning', 'Some pharmacy quantities are not whole numbers — SPDCL\'s sheet shows quantities without decimals; check those rows');
     if (pharmacy.issueTotal != null && !same(pharmacy.issueTotal, pharmacyIssued)) {
       add('warning', `Pharmacy items add up to ${pharmacyIssued}, but the pharmacy bill's total issue amount is ${pharmacy.issueTotal}`);
     }
   }
   const pharmacyNet = pharmacyIssued == null ? null : round2(pharmacyIssued - pharmacyReturned);
   if (finalPharmacy != null && pharmacy == null) {
-    add('error', `The final bill has pharmacy ${finalPharmacy}, but no pharmacy bill was chosen — its items are missing from the SPDCL Excel`);
+    add('error', `The final bill has pharmacy ${finalPharmacy}, but no pharmacy bill was chosen — its items are missing from the ${site} Excel`);
   } else if (finalPharmacy != null && !same(finalPharmacy, pharmacyNet)) {
     add('error', `Pharmacy on the final bill is ${finalPharmacy}, but the pharmacy bill comes to ${pharmacyNet} — are these the same patient's latest bills?`);
   }
 
-  if (late.length) {
-    add('warning', `${late.slice(0, 3).map((d) => `"${d}"`).join(', ')}${late.length > 3 ? ` and ${late.length - 3} more` : ''} run past the last date on the bills (${dateText(latest)}) — check the admission date and those rows`);
-  }
-
   // Returns come off the bill, as they do on the HIS pharmacy bill.
-  const excel = round2(rows.reduce((s, r) => s + (r.head === HEAD.pharmacyReturns ? -r.amount : r.amount), 0));
+  const excel = round2(rows.reduce((s, r) => s + (r.head === HEADS.pharmacyReturns ? -r.amount : r.amount), 0));
   const billLines = round2(final.sections.reduce((s, sec) => s + sec.items.reduce((t, i) => t + (i.amount || 0), 0), 0));
   if (final.grandTotal != null && !same(final.grandTotal, billLines)) {
     add('warning', `The final bill's lines add up to ${billLines}, but its Grand Total is ${final.grandTotal}`);
@@ -470,9 +482,9 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
   const difference = round2(hisBill - excel);
   if (Math.abs(difference) >= 0.01) {
     if (same(difference, roundingGap)) {
-      add('info', `The SPDCL total ${excel} is ${Math.abs(difference)} ${difference > 0 ? 'below' : 'above'} the HIS bill (${hisBill}): some pharmacy prices are rounded to paise, and SPDCL works out Amount = Rate × Qty.`);
+      add('info', `The ${site} total ${excel} is ${Math.abs(difference)} ${difference > 0 ? 'below' : 'above'} the HIS bill (${hisBill}): some pharmacy prices are rounded to paise, and ${site} works out Amount = Rate × Qty.`);
     } else {
-      add('warning', `The SPDCL total ${excel} differs from the HIS bill (${hisBill}) by ${difference} — check the rows`);
+      add('warning', `The ${site} total ${excel} differs from the HIS bill (${hisBill}) by ${difference} — check the rows`);
     }
   }
 
@@ -486,18 +498,61 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
 
   return {
     patient: { name: final.patient.name ?? pharmacy?.patient.name ?? null, ipNo: final.patient.ipNo ?? pharmacy?.patient.ipNo ?? null },
-    tariffType: TARIFF_TYPES.includes(tariffType) ? tariffType : 'EHS',
-    admissionDate: dateText(admission),
-    admissionAssumed: assumed,
-    lastDate: dateText(latest),
+    rows,
+    admission,
+    assumed,
+    earliest,
+    latest,
     stayDays,
-    rows: rows.map(({ day, ...r }) => r),
     heads,
+    pharmacyReturned,
     totals: { excel, hisBill, netAmount: final.netAmount ?? null, pharmacyBill: pharmacyNet, difference },
+  };
+}
+
+/** Rows dated after `last` → the warning naming the first few, or null. */
+function lateRows(rows, last, what) {
+  if (last == null) return null;
+  const late = [...new Set(rows.filter((r) => r.day != null && r.day > last).map((r) => r.description))];
+  if (!late.length) return null;
+  return `${late.slice(0, 3).map((d) => `"${d}"`).join(', ')}${late.length > 3 ? ` and ${late.length - 3} more` : ''} run past ${what}`;
+}
+
+// ── the SPDCL rows ───────────────────────────────────────────────────────
+
+/**
+ * final: parseFinalBill(); pharmacy: parsePharmacyBill() or null.
+ * admissionDate: "dd/mm/yyyy" the person typed, or null for the earliest date on the bills.
+ * → { patient, tariffType, admissionDate, admissionAssumed, lastDate, stayDays, rows, heads, totals, checks }
+ */
+function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffType = 'EHS' }) {
+  const { checks, add } = checkList();
+  const sheet = buildDailyRows({ final, pharmacy, admissionDate, site: 'SPDCL', headOf, heads: HEAD, add });
+
+  if (pharmacy?.items.some((i) => i.returned)) {
+    add('warning', `The pharmacy bill has returns (${sheet.pharmacyReturned}) — entered under "${HEAD.pharmacyReturns}". Check how SPDCL wants returns.`);
+  }
+  if (pharmacy?.items.some((i) => !Number.isInteger(i.qty))) {
+    add('warning', 'Some pharmacy quantities are not whole numbers — SPDCL\'s sheet shows quantities without decimals; check those rows');
+  }
+  const late = lateRows(sheet.rows, sheet.latest, `the last date on the bills (${dateText(sheet.latest)})`);
+  if (late) add('warning', `${late} — check the admission date and those rows`);
+
+  return {
+    patient: sheet.patient,
+    tariffType: TARIFF_TYPES.includes(tariffType) ? tariffType : 'EHS',
+    admissionDate: dateText(sheet.admission),
+    admissionAssumed: sheet.assumed,
+    lastDate: dateText(sheet.latest),
+    stayDays: sheet.stayDays,
+    rows: sheet.rows.map(({ day, ...r }) => r),
+    heads: sheet.heads,
+    totals: sheet.totals,
     checks,
   };
 }
 
 module.exports = {
-  HEAD, TARIFF_TYPES, headOf, dayOf, dateText, isFinalBill, isPharmacyBill, parseFinalBill, parsePharmacyBill, buildSpdclSheet,
+  HEAD, TARIFF_TYPES, headOf, dayOf, dateText, label, printed, amount, isFinalBill, isPharmacyBill, parseFinalBill, parsePharmacyBill,
+  checkList, buildDailyRows, lateRows, buildSpdclSheet, ICU, ROOM, PHARMACY,
 };

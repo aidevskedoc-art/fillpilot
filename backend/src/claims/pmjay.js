@@ -6,7 +6,10 @@
 // "Name(CODE-stratification)"), No. of Days/Units, then "+". The amount is the
 // site's own package rate, so only the code and the units come from the bill:
 // one row per code, units = how many times the bill charges it (13 HAEMOGRAM
-// lines → LB012 × 13; "20 Time(s) x 40.00" counts 20).
+// lines → LB012 × 13; "20 Time(s) x 40.00" counts 20). A line charged under
+// several codes ("LB092+93+94") counts once for each of them.
+
+const { addSummaryIssues } = require('./summary-issues');
 
 const round2 = (n) => Math.round(n * 100) / 100;
 const same = (a, b) => a != null && b != null && Math.abs(a - b) < 0.011;
@@ -18,15 +21,16 @@ const sum = (list) => round2(list.reduce((s, n) => s + (n || 0), 0));
  */
 function buildPmjayClaim({ final, summary }) {
   const checks = [];
-  const add = (level, message) => checks.push({ level, message });
+  // at: { doc: 'final' | 'summary', page } — where on the bill; the panel opens the PDF there.
+  const add = (level, message, at) => checks.push({ level, message, ...(at ? { at } : {}) });
 
-  for (const issue of final.issues || []) add(issue.level, `Final bill: ${issue.message}`);
-  for (const issue of summary?.issues || []) add(issue.level, `Summary bill: ${issue.message}`);
+  for (const issue of final.issues || []) add(issue.level, `Final bill: ${issue.message}`, { doc: 'final', page: issue.page ?? null });
+  addSummaryIssues(add, final, summary);
   if (summary && final.patient?.ipNo && summary.patient?.ipNo && final.patient.ipNo !== summary.patient.ipNo) {
     add('error', `The bills are for different patients: IP ${final.patient.ipNo} (final) vs IP ${summary.patient.ipNo} (summary)`);
   }
   if (summary && !same(final.totals.grandTotal, summary.totals.gross)) {
-    add('error', `Grand total differs: final bill ${final.totals.grandTotal} vs summary bill ${summary.totals.gross}`);
+    add('error', `Grand total differs: final bill ${final.totals.grandTotal} vs summary bill ${summary.totals.gross}`, { doc: 'final', page: final.grandTotalPage ?? null });
   }
 
   const procedures = [];
@@ -38,8 +42,9 @@ function buildPmjayClaim({ final, summary }) {
       const where = g.name && g.name !== section.name ? `${section.name} / ${g.name}` : section.name;
       for (const item of g.items) {
         // Only a single code can be chosen in the Procedure list; "R171+171" is entered by
-        // hand, and so is the hospital's own code (YSSH), which is no package code.
-        if (!item.code || /[+/]/.test(item.code) || item.ownCode) {
+        // hand, and so is the hospital's own code (YSSH), which is no package code. Package
+        // codes charged as one line ("LB092+93+94", codeParts) are a row for each code.
+        if (!item.code || (!item.codeParts && /[+/]/.test(item.code)) || item.ownCode) {
           const key = `${where}|${item.description}`;
           let line = byLine.get(key);
           if (!line) {
@@ -52,18 +57,21 @@ function buildPmjayClaim({ final, summary }) {
           line.amount = round2(line.amount + (item.amount || 0));
           continue;
         }
-        let row = byCode.get(item.code);
-        if (!row) {
-          row = { code: item.code, units: 0, lines: 0, amountOnBill: 0, description: item.description, section: where, notes: [], descriptions: [] };
-          byCode.set(item.code, row);
-          procedures.push(row);
+        const combined = item.codeParts && `${item.code} on the bill is one line for ${item.codeParts.map((p) => p.code).join(', ')} — "${item.description}"`;
+        for (const part of item.codeParts ?? [{ code: item.code, amount: item.amount }]) {
+          let row = byCode.get(part.code);
+          if (!row) {
+            row = { code: part.code, units: 0, lines: 0, amountOnBill: 0, description: item.description, section: where, notes: [], descriptions: [] };
+            byCode.set(part.code, row);
+            procedures.push(row);
+          }
+          row.units += item.qty || 1;
+          row.lines += 1;
+          row.amountOnBill = round2(row.amountOnBill + (part.amount || 0));
+          if (!row.descriptions.includes(item.description)) row.descriptions.push(item.description);
+          for (const message of [...(item.issues || []), combined, part.note]) if (message && !row.notes.includes(message)) row.notes.push(message);
+          if (item.tariff && !row.notes.some((n) => n.startsWith('Marked'))) row.notes.push(`Marked ${item.tariff} on the bill — a PM-JAY bill has package codes`);
         }
-        row.units += item.qty || 1;
-        row.lines += 1;
-        row.amountOnBill = round2(row.amountOnBill + (item.amount || 0));
-        if (!row.descriptions.includes(item.description)) row.descriptions.push(item.description);
-        for (const message of item.issues || []) if (!row.notes.includes(message)) row.notes.push(message);
-        if (item.tariff && !row.notes.some((n) => n.startsWith('Marked'))) row.notes.push(`Marked ${item.tariff} on the bill — a PM-JAY bill has package codes`);
       }
     }
   }

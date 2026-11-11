@@ -11,7 +11,7 @@ const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_MINUTES = 30;
 
 function userToApi(u) {
-  return { id: u.id, username: u.username, fullName: u.full_name, role: u.role };
+  return { id: u.id, username: u.username, fullName: u.full_name, role: u.role, unit: u.unit_code ?? null };
 }
 
 // POST /api/auth/login
@@ -53,7 +53,8 @@ router.post('/login', route(async (req, res) => {
     [user.id],
   );
   await logAction({ actorUserId: user.id, action: 'LOGIN', details: { client: req.get('X-Client') || 'web' }, req });
-  const token = signToken({ sub: user.id, username: user.username, role: user.role });
+  // The unit is for display; who may see what is looked up again on each request (middleware/scope.js).
+  const token = signToken({ sub: user.id, username: user.username, role: user.role, unit: user.unit_code ?? null });
   res.json({ token, user: userToApi(user) });
 }));
 

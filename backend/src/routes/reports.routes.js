@@ -1,11 +1,12 @@
-// Reports for the Admin. Counts only — see src/team-report.js.
+// Reports for the Main Admin (any unit, or all) and Unit Admins (their unit). Counts only — see src/team-report.js.
 const express = require('express');
-const { requireAdmin } = require('../middleware/auth');
+const { requireManager } = require('../middleware/scope');
+const { unitFilter } = require('../user-scope');
 const { teamReport } = require('../team-report');
 const { route, httpError } = require('./helpers');
 
 const router = express.Router();
-router.use(requireAdmin);
+router.use(requireManager);
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -18,10 +19,10 @@ function period(query) {
   return { from, to };
 }
 
-// GET /api/reports/team?from=&to=
+// GET /api/reports/team?from=&to=&unit= — a Unit Admin always gets their own unit.
 router.get('/team', route(async (req, res) => {
   const { from, to } = period(req.query);
-  res.json(await teamReport(from, to));
+  res.json(await teamReport(from, to, unitFilter(req.scope, req.query.unit)));
 }));
 
 module.exports = router;

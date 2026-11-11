@@ -5,11 +5,15 @@ const fs = require('fs');
 const path = require('path');
 const { extractDocument } = require('../src/extraction/extract');
 const {
-  normalizeCode, codeFamily, parseAmount, parseQuantity, parseFinalBill, parseSummaryBill, repairInvoiceNo, repairNumber, repairName,
+  normalizeCode, codeFamily, parseAmount, parseQuantity, parseFinalBill, parseSummaryBill, parsePharmacyBill, detectFormat, repairInvoiceNo, repairNumber, repairName,
 } = require('../src/extraction/formats/yashoda');
-const { buildTgnpdclClaim } = require('../src/claims/tgnpdcl');
+const { buildTgnpdclClaim, buildTgnpdclPharmacy, pharmacyFromExcel } = require('../src/claims/tgnpdcl');
+const { writeTgnpdclPharmacyWorkbook } = require('../src/claims/tgnpdcl-pharmacy-workbook');
+const { readFirstSheet } = require('../src/claims/xlsx');
+const spdcl = require('../src/claims/spdcl');
 const { buildPmjayClaim } = require('../src/claims/pmjay');
 const { buildCilClaim } = require('../src/claims/cil');
+const { buildBhelClaim } = require('../src/claims/bhel');
 const { buildAliasIndex, seedAliases } = require('../src/alias-index');
 const { ocrAvailable } = require('../src/ocr');
 const { check, checkTrue, done } = require('./lib/check');
@@ -22,6 +26,11 @@ check('code 75 IA → 751A', normalizeCode('75 IA/NIMS').code, '751A');
 check('code NIMS/IIE → 11E', normalizeCode('NIMS/IIE').code, '11E');
 check('COMM misreads', ['2121/COPN.', '586/corm.', '303/cou.', '586/conun.'].map((c) => normalizeCode(c).tariff), ['COMM', 'COMM', 'COMM', 'COMM']);
 check('surgery code kept', normalizeCode('S5.1.17').code, 'S5.1.17');
+// EHS procedure codes, printed without a mark (the client, 2026-11-11: 51.22.6 LAPAROSCOPIC CHOLECYSTECTOMY, in EHS Ax-III).
+check('EHS code: dotted digits, OCR look-alikes repaired, a stray end dot dropped',
+  ['51.22.6', '5I.22.6', '51 .22.6', '51.22.6.', '47.0.1.2'].map((c) => [normalizeCode(c).code, normalizeCode(c).valid, normalizeCode(c).ehs ?? false]),
+  [['51.22.6', true, true], ['51.22.6', true, true], ['51.22.6', true, true], ['51.22.6', true, true], ['47.0.1.2', true, true]]);
+check('EHS code: an amount or a one-dot figure is not one', ['350.00', '51.22', '83,500.00'].map((c) => normalizeCode(c).ehs ?? false), [false, false, false]);
 check('PM-JAY codes: O/0 and I/1 repaired', ['CIOII', 'RIOOI', 'LBIOO', 'NIOOI', 'C1001', 'R1034'].map((c) => normalizeCode(c).code), ['CI011', 'RI001', 'LB100', 'NI001', 'CI001', 'RI034']);
 check('PM-JAY codes read right are kept', ['LB025', 'CC003', 'NU116', 'EP092', 'GP009', 'PT004'].map((c) => normalizeCode(c).code), ['LB025', 'CC003', 'NU116', 'EP092', 'GP009', 'PT004']);
 check('marked code keeps the NIMS repair only', [normalizeCode('N1003/NIMS').code, normalizeCode('HA006/NIMS').code], ['N1003', 'HA006']);
@@ -53,7 +62,17 @@ check('unmarked code with two letters first on a NIMS bill read as a package (CG
 check('surgery code on a NIMS bill: I and O in the digits', [normalizeCode('S5.I.I7', 'nims').code, normalizeCode('S5.1.17', 'nims').code], ['S5.1.17', 'S5.1.17']);
 check('package code: letters and digits by place, both ways', ['CIOII', 'C1O11', 'LBO37', 'CCOO8', 'L8037'].map((c) => normalizeCode(c).code), ['CI011', 'CI011', 'LB037', 'CC008', 'L8037']);
 check('package codes have no other reading', ['CI011', 'RI034', 'LB025'].map((c) => normalizeCode(c).alternatives ?? null), [null, null, null]);
-check('bill kind from its codes', [codeFamily(['41A/NIMS', '78I/NIMS', 'S5.1.17', 'N1003']), codeFamily(['CIOII', 'LB025', 'YSSH', 'CC008/NIMS']), codeFamily([])], ['nims', 'package', 'package']);
+// The client, 2026-11-06 (IP 130007): "LB092+93+94" is three codes — the later ones printed without the letters.
+check('package codes on one line: split, the short ones take the letters of the code before them', ['LB092+93+94', 'LB120+90+55+58', 'RI029+RI030', 'LBO92+93+9O', 'LB092 + 93 + 94', 'LB092+RI030+31'].map((c) => [normalizeCode(c).code, normalizeCode(c).parts]), [
+  ['LB092+93+94', ['LB092', 'LB093', 'LB094']],
+  ['LB120+90+55+58', ['LB120', 'LB090', 'LB055', 'LB058']],
+  ['RI029+RI030', ['RI029', 'RI030']],
+  ['LB092+93+90', ['LB092', 'LB093', 'LB090']],
+  ['LB092+93+94', ['LB092', 'LB093', 'LB094']],
+  ['LB092+RI030+31', ['LB092', 'RI030', 'RI031']],
+]);
+check('combined codes that are not all package codes are not split', ['R171+171', 'LB092+9A', 'R171+171/NIMS', 'N1003+14A/NIMS'].map((c) => normalizeCode(c).parts ?? null), [null, null, null, null]);
+check('bill kind from its codes',[codeFamily(['41A/NIMS', '78I/NIMS', 'S5.1.17', 'N1003']), codeFamily(['CIOII', 'LB025', 'YSSH', 'CC008/NIMS']), codeFamily([])], ['nims', 'package', 'package']);
 check('numbers: look-alikes are digits', ['I31885', '13l885', '1318O5', '131885', '13188S'].map(repairNumber), ['131885', '131885', '131805', '131885', '13188S']);
 check('names: a 1 or 0 next to a letter is I or O', ['MR. CHANDRA KANTHA RAO NET1', 'SAR1KI VEDA', 'DR. R0Y', 'A KUMAR 2', 'G V'].map(repairName),
   ['MR. CHANDRA KANTHA RAO NETI', 'SARIKI VEDA', 'DR. ROY', 'A KUMAR 2', 'G V']);
@@ -138,6 +157,263 @@ check('quantity OCR-spoilt is not parsed (the bill reader then uses amount ÷ ra
     name: 'MR. CHANDRA KANTHA RAO NETI', age: 50, gender: 'Male', ipNo: '131885', yhNo: '400029024', consultant: 'SUBBAIAH CHOWDHARY G V', consultantSpeciality: 'NEUROLOGY',
     admission: { date: '2026-10-10', time: '01:36' }, discharge: { date: '2026-10-12', time: '17:36' },
   }]);
+
+  // The client's bill (IP 445603, 2026-11-11): a surgery charged under an EHS code with no mark —
+  // a tariff row for the site, searched in EHS Ax-III, then EHS Ax-II (tgnpdcl-plan.ts).
+  const ehsBill = parseFinalBill([{ page: 1, width: 600, lines: [
+    L(800, [10, 'Name : MISS. BANOTHU GANGA .'], [480, 'IP No: 445603']),
+    L(780, [10, '1. SURGERY CHARGES']),
+    L(770, [50, 'LAPAROSCOPIC CHOLECYSTECTOMY'], [420, '51.22.6'], [510, '83,500.00']),
+    L(760, [370, 'Sub Total...'], [510, '83,500.00']),
+    L(750, [370, 'Grand Total...'], [510, '83,500.00']),
+  ] }]);
+  const ehsItem = ehsBill.sections[0]?.groups[0]?.items[0];
+  check('EHS bill: code read as printed, no misread warning', [ehsItem?.description, ehsItem?.code, ehsItem?.tariff, ehsBill.issues], ['LAPAROSCOPIC CHOLECYSTECTOMY', '51.22.6', null, []]);
+  check('EHS claim: a tariff row marked EHS, not left for the person', buildTgnpdclClaim({ final: ehsBill }).tabs.investigations.items.map((r) => [r.code, r.tariff, r.manual, r.qty, r.amountClaimed]),
+    [['51.22.6', 'EHS', false, 1, 83500]]);
+  // Surgery charges are in EHS Ax-II or Ax-III whatever the code's shape (the client, 2026-11-11).
+  const surgeryBill = parseFinalBill([{ page: 1, width: 600, lines: [
+    L(800, [10, 'Name : MR. TEST'], [480, 'IP No: 1']),
+    L(780, [10, '1. SURGERY CHARGES']),
+    L(770, [50, 'ORIF'], [420, 'S5.1.17'], [510, '62,000.00']),
+    L(765, [50, 'MINOR PROCEDURE'], [420, '41A/NIMS'], [510, '300.00']),
+    L(760, [370, 'Sub Total...'], [510, '62,300.00']),
+    L(750, [370, 'Grand Total...'], [510, '62,300.00']),
+  ] }]);
+  check('EHS claim: an unmarked code of the surgery charges is EHS too; a code the bill marks keeps its own list',
+    buildTgnpdclClaim({ final: surgeryBill }).tabs.investigations.items.map((r) => [r.code, r.tariff]), [['S5.1.17', 'EHS'], ['41A', 'NIMS']]);
+
+  // Two summary amounts OCR read as "O" (IP 132231, 2026-11-11): what the total leaves for them is said once —
+  // not reported as a wrong total — and the final bill's sections of those names settle them.
+  const twoUnread = parseSummaryBill([{ page: 1, width: 600, lines: [
+    L(800, [100, 'BILL OF SUPPLY / INVOICE NO: ICO6079718']),
+    L(780, [50, 'IP NO: 1']),
+    L(760, [50, 'Description of Healthcare Services']),
+    L(740, [50, 'ROOM RENT'], [500, '1,500.00']),
+    L(730, [50, 'CLINICAL BIOCHEMISTRY'], [500, 'O']),
+    L(720, [50, 'CYTOLOGY'], [500, 'O']),
+    L(700, [300, 'TOTAL AMOUNT:'], [500, '23,000.00']),
+  ] }]);
+  check('summary: two unreadable charges — one warning with what the total leaves, no wrong-total error',
+    [twoUnread.issues.map((i) => [i.level, i.code ?? null]), twoUnread.unreadableCharges], [[['warning', 'unreadable-charges']], { names: ['CLINICAL BIOCHEMISTRY', 'CYTOLOGY'], amount: 21500 }]);
+  const finalFor = (cytology) => ({
+    patient: { ipNo: '1' }, issues: [], totals: { grandTotal: 19500 + cytology, netAmount: 19500 + cytology },
+    sections: [
+      { name: 'ROOM RENT', groups: [{ name: 'ROOM RENT', items: [], subTotal: 1500 }] },
+      { name: 'LABORATORY', groups: [{ name: 'CLINICAL BIOCHEMISTRY', items: [], subTotal: 18000 }, { name: 'CYTOLOGY', items: [], subTotal: cytology }] },
+    ],
+  });
+  const summaryChecks = (claim) => claim.checks.filter((c) => /^Summary bill/.test(c.message)).map((c) => [c.level, c.message]);
+  check('claim: the final bill settles them — an info line instead of the warning', summaryChecks(buildBhelClaim({ final: finalFor(3500), summary: twoUnread })), [[
+    'info', 'Summary bill: CLINICAL BIOCHEMISTRY 18000.00, CYTOLOGY 3500.00 — not readable on the summary, taken from the final bill; together 21500.00, exactly what the summary\'s total leaves for them',
+  ]]);
+  check('claim: the final bill disagrees — the warning stays', summaryChecks(buildBhelClaim({ final: finalFor(3000), summary: twoUnread })).map(([level]) => level), ['warning']);
+  check('tgnpdcl: an unreadable summary amount is not compared as "vs summary bill null"',
+    buildTgnpdclClaim({ final: finalFor(3500), summary: twoUnread }).checks.filter((c) => /vs summary bill null/.test(c.message)), []);
+
+  // The client's bill (IP 130007, 2026-11-02), its combined-code lines: each code's share is its rate on its own line of the bill.
+  const combinedBill = parseFinalBill([{ page: 1, width: 600, lines: [
+    L(800, [10, 'Name : MRS. TEST'], [480, 'IP No: 1']),
+    L(780, [10, '1. LABORATORY']),
+    L(770, [50, 'ELECTROLYTES - SERUM (SODIUM, POTASSIUM, CHLORIDE)'], [420, 'LB092+93+94'], [510, '390.00']),
+    L(760, [50, 'GLUCOSE - RANDOM'], [420, 'LB055'], [510, '40.00']),
+    L(750, [50, 'POCT ABG ANALYSIS'], [420, 'LB120+90+55+58'], [510, '1,440.00']),
+    L(740, [50, 'POTASSIUM - SERUM'], [420, 'LB093'], [510, '120.00']),
+    L(730, [50, 'SODIUM - SERUM'], [420, 'LB092'], [510, '120.00']),
+    L(720, [50, 'CHLORIDES'], [420, 'LB094'], [510, '150.00']),
+    L(710, [50, 'CREATININE - SERUM'], [420, 'LB058'], [510, '100.00']),
+    L(700, [370, 'Sub Total...'], [510, '2,360.00']),
+    L(690, [10, '2. RADIOLOGY']),
+    L(680, [50, 'US DOP SINGAL LIMB ARTERIAL & VENOUS'], [420, 'RI029+RI030'], [510, '2,000.00']),
+    L(670, [50, 'US NECK VENOUS DOPPLER'], [420, 'RI030'], [510, '1,000.00']),
+    L(660, [370, 'Sub Total...'], [510, '3,000.00']),
+    L(650, [370, 'Grand Total...'], [510, '5,360.00']),
+  ] }]);
+  const combinedItems = combinedBill.sections.flatMap((s) => s.groups.flatMap((g) => g.items));
+  const partsOf = (start) => combinedItems.find((i) => i.description.startsWith(start)).codeParts.map((p) => [p.code, p.amount, Boolean(p.note)]);
+  check('combined line: shared at the bill\'s own rates; two codes never charged alone shared equally, with a note', [partsOf('ELECTROLYTES'), partsOf('POCT'), partsOf('US DOP')], [
+    [['LB092', 120, false], ['LB093', 120, false], ['LB094', 150, false]],
+    [['LB120', 650, true], ['LB090', 650, true], ['LB055', 40, false], ['LB058', 100, false]],
+    [['RI029', 1000, false], ['RI030', 1000, false]],
+  ]);
+  check('combined line: no misread warning, no problems', combinedBill.issues, []);
+  const pmCombined = buildPmjayClaim({ final: combinedBill });
+  check('pmjay: a combined line is a row for each code, added to that code\'s own lines', [pmCombined.procedures.map((p) => [p.code, p.units, p.amountOnBill]), pmCombined.manual], [[
+    ['LB092', 2, 240], ['LB093', 2, 240], ['LB094', 2, 300], ['LB055', 2, 80], ['LB120', 1, 650], ['LB090', 1, 650], ['LB058', 2, 200], ['RI029', 1, 1000], ['RI030', 2, 2000],
+  ], []]);
+  check('pmjay: coded = the bill', pmCombined.totals.coded, 5360);
+  const cilCombined = buildCilClaim({ final: combinedBill });
+  check('cil: a combined line is a CGHS row for each code, at its share', [cilCombined.cghs.map((r) => [r.code, r.qty, r.rate, r.amount]), cilCombined.manual], [[
+    ['LB092', 2, 120, 240], ['LB093', 2, 120, 240], ['LB094', 2, 150, 300], ['LB055', 2, 40, 80], ['LB120', 1, 650, 650], ['LB090', 1, 650, 650], ['LB058', 2, 100, 200],
+    ['RI029', 1, 1000, 1000], ['RI030', 2, 1000, 2000],
+  ], []]);
+  checkTrue('cil: an unsure share is noted on its row', cilCombined.cghs.find((r) => r.code === 'LB120').notes.some((n) => /shared equally/.test(n)));
+
+  // A check says where on the bill it is, so the panel can open the PDF there (the client, 2026-11-06).
+  const paged = parseFinalBill([
+    { page: 1, width: 600, lines: [L(800, [10, 'Name : MRS. TEST'], [480, 'IP No: 1']), L(780, [10, '1. LABORATORY']), L(770, [50, 'SODIUM - SERUM'], [420, 'LB092'], [510, '120.00'])] },
+    { page: 2, width: 600, lines: [
+      L(800, [50, 'HOLTER ANALYSIS (72 HRS)'], [420, 'CI003 (2500X3)'], [510, '7,500.00']),
+      L(790, [370, 'Sub Total...'], [510, '7,700.00']),
+      L(650, [370, 'Grand Total...'], [510, '7,700.00']),
+    ] },
+  ]);
+  check('issues carry their page: the sub total and the misread code, both on page 2', paged.issues.map((i) => [i.level, i.page]), [['error', 2], ['warning', 2]]);
+  check('claim checks: where on the bill, none for a check about no bill', buildCilClaim({ final: paged }).checks.map((c) => c.at ?? null), [{ doc: 'final', page: 2 }, { doc: 'final', page: 2 }, null]);
+
+  // TGNPDCL Pharmacy tab (the client, 2026-11-06): IP 131537's pharmacy bill by hand, as printed —
+  // descriptions on two lines around the Qty / Value line, no price column, the indent's C/F total alone.
+  const pharmacyHead = [
+    L(820, [180, 'YASHODA HEALTHCARE SERVICES LIMITED']),
+    L(810, [230, 'PHARMACY DETAILS']),
+    L(800, [10, 'Name : MR. D VENKATESHWARLU'], [400, 'IP No: 131537']),
+    L(790, [20, 'Indent'], [80, 'Date'], [170, 'Item Description'], [345, 'Qty'], [410, 'Value'], [500, 'C/F Total']),
+    L(785, [20, 'No']),
+  ];
+  const pharmacyLines = [
+    ...pharmacyHead,
+    L(780, [10, 'Item Issues >>>>>>']),
+    L(775, [20, '65816'], [70, '09/10/2026']),
+    L(770, [75, 'CIRCULAR STAPLER WITH TRI-STAPLE']),
+    L(765, [355, '1'], [400, '35,680.00']),
+    L(760, [75, '(TRIEEA28MT) (COVIDIEN MEDTRONIC)']),
+    L(750, [75, 'XCEL BLADELESS TROCAR 5 X 100MM (B5LT)']),
+    L(745, [355, '1'], [400, '15,042.00']),
+    L(740, [75, '(ETHICON)']),
+    L(730, [510, '50,722.00']),
+    L(720, [400, 'TOTAL ISSUE AMOUNT: 50,722.00']),
+    L(710, [450, 'NET AMOUNT: 50,722.00']),
+    L(50, [10, 'Authorized Signatory'], [440, 'Page Total: 50,722.00']),
+  ];
+  check('pharmacy bill detected', detectFormat(pharmacyLines), 'yashoda-pharmacy-bill');
+  const pharmacyBill = parsePharmacyBill([{ page: 1, width: 600, lines: pharmacyLines }]);
+  check('pharmacy bill: patient, items (two-line names joined, indent date), totals, no problems', [
+    pharmacyBill.patient, pharmacyBill.items.map((i) => [i.date, i.description, i.qty, i.value, i.returned]), pharmacyBill.totals, pharmacyBill.issues,
+  ], [{ name: 'MR. D VENKATESHWARLU', ipNo: '131537' }, [
+    ['2026-10-09', 'CIRCULAR STAPLER WITH TRI-STAPLE (TRIEEA28MT) (COVIDIEN MEDTRONIC)', 1, 35680, false],
+    ['2026-10-09', 'XCEL BLADELESS TROCAR 5 X 100MM (B5LT) (ETHICON)', 1, 15042, false],
+  ], { issued: 50722, returned: null, net: 50722 }, []]);
+  const pharmacyFinal = {
+    patient: { name: 'MR. D VENKATESHWARLU', ipNo: '131537' },
+    // Written out: the item() / section() helpers are defined further down.
+    sections: [{ no: 4, name: 'PHARMACY', groups: [{ name: 'PHARMACY', subTotal: 50722, items: [
+      { description: 'PHARMACY', qty: 1, unit: null, rate: null, code: null, tariff: null, codeRaw: null, amount: 50722, page: 1, issues: [] },
+    ] }] }],
+    doctors: [], totals: { grandTotal: 50722, netAmount: 50722 }, grandTotalPage: 1, issues: [],
+  };
+  const pharmacyClaim = buildTgnpdclClaim({ final: pharmacyFinal, pharmacy: pharmacyBill });
+  check('tgnpdcl pharmacy: rows as the team\'s Excel (≥ ₹2,000 → pouch), no errors', [
+    pharmacyClaim.tabs.pharmacy.rows.map((r) => [r.date, r.name, r.rate, r.qty, r.pouch]), pharmacyClaim.checks.filter((c) => c.level === 'error'),
+  ], [[
+    ['2026-10-09', 'CIRCULAR STAPLER WITH TRI-STAPLE (TRIEEA28MT) (COVIDIEN MEDTRONIC)', 35680, 1, true],
+    ['2026-10-09', 'XCEL BLADELESS TROCAR 5 X 100MM (B5LT) (ETHICON)', 15042, 1, true],
+  ], []]);
+  const upload = readFirstSheet(writeTgnpdclPharmacyWorkbook(pharmacyClaim.tabs.pharmacy.rows));
+  check('tgnpdcl pharmacy: the site\'s template, filled', [upload.sheetName, upload.rows], ['Pharmacy', [
+    ['Date of utilization', 'Enter the name of the item', 'Amount per item', 'Qty'],
+    ['2026-10-09', 'CIRCULAR STAPLER WITH TRI-STAPLE (TRIEEA28MT) (COVIDIEN MEDTRONIC)', 35680, 1],
+    ['2026-10-09', 'XCEL BLADELESS TROCAR 5 X 100MM (B5LT) (ETHICON)', 15042, 1],
+  ]]);
+  // The pharmacy bill alone ("Excel & PDF" tab): the same rows, no final bill needed.
+  const pharmacyAlone = buildTgnpdclPharmacy(pharmacyBill);
+  check('tgnpdcl pharmacy alone: the same rows and bill as in the claim, no problems', [pharmacyAlone.rows, pharmacyAlone.bill, pharmacyAlone.checks],
+    [pharmacyClaim.tabs.pharmacy.rows, pharmacyClaim.tabs.pharmacy.bill, []]);
+  check('tgnpdcl pharmacy: another patient\'s pharmacy bill is an error', buildTgnpdclClaim({ final: { ...pharmacyFinal, patient: { ipNo: '999' } }, pharmacy: pharmacyBill })
+    .checks.filter((c) => c.level === 'error').map((c) => c.message), ['The bills are for different patients: IP 999 (final) vs IP 131537 (pharmacy)']);
+
+  // Returns take their qty off the same item issued; one never issued is left for the person (and the total says so).
+  const returns = parsePharmacyBill([{ page: 1, width: 600, lines: [
+    ...pharmacyHead,
+    L(780, [10, 'Item Issues >>>>>>']),
+    L(775, [20, '70001'], [70, '01/10/2026']),
+    L(765, [75, 'PAN 40 TAB'], [355, '10'], [400, '50.00']),
+    L(755, [75, 'DOLO 650'], [355, '6'], [400, '10.00']),
+    L(745, [400, 'TOTAL ISSUE AMOUNT: 60.00']),
+    L(735, [10, 'Item Returns >>>>>>']),
+    L(730, [20, '70002'], [70, '03/10/2026']),
+    L(725, [75, 'PAN 40 TAB'], [355, '4'], [400, '20.00']),
+    L(720, [75, 'SOMETHING ELSE'], [355, '1'], [400, '9.00']),
+    L(715, [400, 'TOTAL RETURN AMOUNT: 29.00']),
+    L(705, [450, 'NET AMOUNT: 31.00']),
+  ] }]);
+  const returnsClaim = buildTgnpdclClaim({ final: { ...pharmacyFinal, sections: [] }, pharmacy: returns });
+  check('tgnpdcl pharmacy: returns off the item, an unknown return and the rounding said', [
+    returnsClaim.tabs.pharmacy.rows.map((r) => [r.name, r.rate, r.qty, r.amount]),
+    returnsClaim.checks.filter((c) => /pharmacy|paise/i.test(c.message)).map((c) => c.level),
+  ], [[['PAN 40 TAB', 5, 6, 30], ['DOLO 650', 1.67, 6, 10.02]], ['warning', 'error', 'info']]);
+
+  // The HIS pharmacy Excel instead of the PDF: the same rows.
+  const hisRows = [
+    ['PHARMACY DETAILS'],
+    ['Name :', 'MR. D VENKATESHWARLU', null, null, 'IP No :', '131537'],
+    ['Indent No', 'Date', 'Item Description', 'Batch', 'Expiry', 'Qty', 'Price', 'Value', 'C/F Total'],
+    ['Item Issues >>>>>>'],
+    ['65816', '09/10/2026', 'CIRCULAR STAPLER WITH TRI-STAPLE (TRIEEA28MT) (COVIDIEN MEDTRONIC)', 'B1', '12/2028', 1, 35680, 35680],
+    [null, null, 'XCEL BLADELESS TROCAR 5 X 100MM  (B5LT) (ETHICON)', 'B2', '12/2028', 1, 15042, 15042, 50722],
+    [null, null, null, null, null, null, 'TOTAL ISSUE AMOUNT: 50722.00'],
+  ];
+  const fromExcel = buildTgnpdclClaim({ final: pharmacyFinal, pharmacy: pharmacyFromExcel(spdcl.parsePharmacyBill(hisRows)) });
+  check('tgnpdcl pharmacy: from the HIS Excel, the same rows', [fromExcel.tabs.pharmacy.rows.map((r) => [r.date, r.rate, r.qty]), fromExcel.checks.filter((c) => c.level === 'error')],
+    [[['2026-10-09', 35680, 1], ['2026-10-09', 15042, 1]], []]);
+
+  // The wide pharmacy bill layout (IP 132231, 2026-11-09): Batch No, Expiry Date and Price, read word by word as
+  // OCR gives them — the item and its batch, and the expiry and qty, sit closer than a column break.
+  const S = (...words) => ({ text: words.map((w) => w[2]).join(' '), x0: words[0][0], x1: words[words.length - 1][1], words: words.map(([x0, x1, text]) => ({ text, x0, x1 })) });
+  const W = (y, ...segments) => ({ y, h: 9, segments, text: segments.map((s) => s.text).join(' | ') });
+  const wide = parsePharmacyBill([{ page: 1, width: 920, lines: [
+    W(820, S([300, 627, 'YASHODA HEALTHCARE SERVICES LIMITED'])),
+    W(810, S([360, 537, 'PHARMACY DETAILS'])),
+    W(800, S([45, 300, 'Name : DR SUREKHA J']), S([640, 700, 'IP No:']), S([730, 790, '132231'])),
+    W(790, S([35, 80, 'Indent'], [85, 100, 'No'], [128, 165, 'Date']), S([225, 262, 'Item']), S([345, 385, 'Batch'], [390, 417, 'No']),
+      S([465, 512, 'Expiry']), S([545, 567, 'Qty']), S([604, 650, 'Price']), S([710, 757, 'Value']), S([805, 835, 'C/F'], [842, 888, 'Total'])),
+    W(785, S([200, 298, 'Description']), S([474, 505, 'Date'])),
+    W(780, S([32, 197, 'Item Issues >>>>>>'])),
+    W(775, S([32, 95, '7511550']), S([118, 197, '12/10/2026'])),
+    W(770, S([118, 250, 'MEDIGRIP IV FIX'])),
+    W(765, S([322, 370, '608380']), S([447, 540, '31/07/2029'], [548, 556, '1']), S([610, 650, '110.00']), S([735, 777, '110.00'])),
+    W(760, S([118, 220, '4.5CM X 6CM'])),
+    W(750, S([118, 178, 'SYRINGE'], [186, 222, '10ML'], [230, 310, '(NIPRO)'], [322, 392, '26G13K71']), S([447, 540, '30/06/2031'], [548, 563, '15']),
+      S([610, 650, '28.13']), S([720, 777, '421.95'])),
+    W(740, S([622, 890, 'TOTAL ISSUE AMOUNT:'])),
+    W(735, S([800, 880, '531.95'])),
+    W(730, S([32, 200, 'Item Returns >>>>>'])),
+    W(725, S([32, 95, '7522235']), S([118, 197, '04/11/2026'])),
+    W(720, S([170, 290, 'SYRINGE 10ML']), S([322, 392, '26G13K71']), S([447, 540, '30/06/2031'], [548, 563, '12']), S([610, 650, '28.13']), S([715, 777, '-337.56'])),
+    W(715, S([170, 230, '(NIPRO)'])),
+    W(705, S([622, 890, 'TOTAL RETURN AMOUNT:'])),
+    W(700, S([800, 880, '-337.56'])),
+    W(695, S([650, 890, 'NET AMOUNT: 194.00'])),
+  ] }]);
+  check('pharmacy bill, wide layout: names without batch or expiry, price, returns; two-line totals; NET rounded is no error', [
+    wide.items.map((i) => [i.description, i.qty, i.price, i.value, i.returned]), wide.totals, wide.issues,
+  ], [[
+    ['MEDIGRIP IV FIX 4.5CM X 6CM', 1, 110, 110, false], ['SYRINGE 10ML (NIPRO)', 15, 28.13, 421.95, false], ['SYRINGE 10ML (NIPRO)', 12, 28.13, 337.56, true],
+  ], { issued: 531.95, returned: 337.56, net: 194 }, []]);
+  check('tgnpdcl pharmacy, wide layout: the printed price, the return off the item, no problems', [buildTgnpdclPharmacy(wide).rows.map((r) => [r.rate, r.qty]), buildTgnpdclPharmacy(wide).checks],
+    [[[110, 1], [28.13, 3]], []]);
+
+  // A BHEL patient's final bill (IP 132231, 2026-11-09): E codes, "3435(1000-30%)" (base rate less 30%), and lab
+  // lines dated in front of the name — the name's next lines sit right of the date, not to be taken for the stamp.
+  check('BHEL codes: E codes and base rate less discount', ['E-1530', 'E-I53O', '1417(1063-30%', '3435(1000-30%)'].map((c) => {
+    const r = normalizeCode(c);
+    return [r.code, r.valid, r.baseRate ?? null, r.discountPct ?? null];
+  }), [['E-1530', true, null, null], ['E-1530', true, null, null], ['1417', true, 1063, 30], ['3435', true, 1000, 30]]);
+  const bhelBill = parseFinalBill([{ page: 1, width: 595, lines: [
+    L(810, [80, 'Name : DR SUREKHA J'], [420, 'IP No: 132231']),
+    L(790, [10, '1. LABORATORY']),
+    L(785, [10, 'HAEMATOLOGY']),
+    L(780, [24, '12/10/2026'], [120, 'ACTIVATED PARTIAL']),
+    L(775, [120, 'THROMOBOPLASTIN TIME'], [396, 'E-354'], [511, '315.00']),
+    L(771, [120, '(APTT)']),
+    L(764, [24, '13/10/2026'], [120, 'CELL COUNT - CSF'], [396, '1417(1063-30%'], [511, '744.00']),
+    L(758, [322, 'Sub Total...'], [511, '1,059.00']),
+    L(752, [322, 'Grand Total...'], [511, '1,059.00']),
+  ] }]);
+  check('BHEL final bill: dates off the names, names whole, codes, no problems', [
+    bhelBill.sections.flatMap((s) => s.groups.flatMap((g) => g.items.map((i) => [i.date, i.description, i.code, i.baseRate ?? null, i.amount]))), bhelBill.issues,
+  ], [[
+    ['2026-10-12', 'ACTIVATED PARTIAL THROMOBOPLASTIN TIME (APTT)', 'E-354', null, 315], ['2026-10-13', 'CELL COUNT - CSF', '1417', 1063, 744],
+  ], []]);
 }
 
 // Claim rules on hand-made bills (pure — no PDFs, no OCR, no patient data)
@@ -255,6 +531,78 @@ check('cil: CGHS + Unlisted + left for the person + pharmacy = the bill, nothing
 }
 check('cil: bill number, bill date = discharge, pharmacy', [cil.hospitalBillNumber, cil.billDate, cil.pharmacy], ['ICO1', '01-10-2026', 2688.65]);
 check('cil: no problems on a matching pair', cil.checks, []);
+
+// BHEL Upload Bill (KareXpert, the client 2026-11-09): one row per Service Type with the bill's total for it,
+// whole rupees, the client's Remarks; the sections that fit none of the types are ONE "Other Unlisted Item"
+// row — their total, their names in Remarks (the client 2026-11-11).
+{
+  const final = finalBill([
+    section('ROOM RENT', [['ROOM RENT', [item('ROOM RENT', 11, 3531.82, 38850)], 38850]]),
+    section('DOCTOR FEES', [['DOCTOR FEES', [item('SUREKHA J', 1, 15625, 15625)], 15625]]),
+    section('CARDIOLOGY', [['CARDIOLOGY', [item('ECG', 1, 150, 150)], 150]]),
+    section('SURGERY', [['SURGERY CHARGES', [item('ORIF', 1, 63201, 63201)], 63201]]),
+    section('PHARMACY', [['PHARMACY', [item('PHARMACY', 1, null, 194068.61)], 194068.61]]),
+    section('RADIOLOGY', [['CT SCAN', [item('CT CHEST', 1, 20000, 20000)], 20000], ['RADIOGRAPH', [item('CHEST PA', 1, 4113, 4113)], 4113]]),
+    section('LABORATORY', [
+      ['HAEMATOLOGY', [item('HAEMOGRAM', 1, 30000, 30000)], 30000], ['SURGICAL PATHOLOGY', [item('BIOPSY', 1, 10000, 10000)], 10000],
+      ['TRANSFUSION MEDICINE', [item('BLOOD IRRADIATION', 1, 5000, 5000)], 5000],
+    ]),
+    section('RBS WITH GLUCOMETER', [['RBS WITH GLUCOMETER', [item('RBS WITH GLUCOMETER', 11, 30, 330)], 330]]),
+    section('BLOOD TRANSFUSION', [['BLOOD TRANSFUSION', [item('BLOOD COMPONENT TRANSFUSION', 1, 3500, 3500)], 3500]]),
+    section('INTENSIVE CARE UNIT', [['INTENSIVE CARE UNIT', [item('ICU BED CHARGES', 1, 6000, 6000)], 6000]]),
+    section('OXYGEN', [['OXYGEN', [item('OXYGEN', 1, 3240, 3240)], 3240]]),
+  ], 394077.61);
+  final.totals.netAmount = 394078;
+  const summary = {
+    invoiceNo: 'ICO6079718',
+    patient: { ipNo: '1', company: 'BHEL RCPURAM', admission: { date: '2026-10-12', time: '18:24' }, discharge: { date: '2026-11-04', time: '16:38' } },
+    categories: [], totals: { gross: 394077.61, rounded: 394078, paid: 0 }, issues: [],
+  };
+  const bhel = buildBhelClaim({ final, summary });
+  check('bhel: Patient Details — IP, invoice, D.O.A, D.O.D twice, as the site writes dates',
+    [bhel.visitId, bhel.billNo, bhel.visitDateTime, bhel.dischargeDateTime, bhel.billDateTime],
+    ['1', 'ICO6079718', '12/10/2026 18:24', '04/11/2026 16:38', '04/11/2026 16:38']);
+  check('bhel: one row per Service Type, in the client\'s order, whole rupees, the client\'s Remarks', bhel.rows.map((r) => [r.serviceType, r.qty, r.amount, r.remarks]), [
+    ['Room Rent', 1, 38850, 'ROOM RENT'],
+    ['IP Consultation', 1, 15625, 'DOCTOR CONSULTATIONS'],
+    ['Cardiology BHEL', 1, 150, 'ECG'],
+    ['Surgery', 1, 63201, 'SURGERY CHARGES'],
+    ['Pharmacy', 1, 194069, 'IP PHARMACY + MEDICAL APPLIANCES'],
+    ['Radiology BHEL', 1, 24113, 'RADIOLOGY INVESTIGATIONS'],
+    ['Pathology BHEL', 1, 45330, 'LAB INVESTIGATIONS'],
+    ['Other Unlisted Item', 1, 12740, 'BLOOD TRANSFUSION, INTENSIVE CARE UNIT, OXYGEN'],
+  ]);
+  check('bhel: a lab section\'s groups (surgical pathology, transfusion medicine) and RBS are all Pathology', bhel.rows.find((r) => r.serviceType === 'Pathology BHEL').sections,
+    ['LABORATORY / HAEMATOLOGY', 'LABORATORY / SURGICAL PATHOLOGY', 'LABORATORY / TRANSFUSION MEDICINE', 'RBS WITH GLUCOMETER']);
+  check('bhel: the Other Unlisted Item row holds every unlisted section', bhel.rows[7].sections, ['BLOOD TRANSFUSION', 'INTENSIVE CARE UNIT', 'OXYGEN']);
+  check('bhel: nothing left for the person', bhel.manual, []);
+  check('bhel: totals and no problems', [bhel.totals, bhel.checks], [{ billTotal: 394077.61, netAmount: 394078, rows: 394078, manual: 0 }, []]);
+
+  // ICU bed charges under a ward section are not Room Rent; each unlisted group is named; a ₹0 one is left out.
+  const ward = buildBhelClaim({ final: finalBill([
+    section('WARD CHARGES', [['WARD CHARGES', [item('GENERAL WARD', 2, 1500, 3000)], 3000], ['ICU BED CHARGES', [item('ICU BED', 1, 6000, 6000)], 6000]]),
+    section('PROCEDURES', [['BED SIDE PROCEDURE', [item('CENTRAL LINE', 1, 5000, 5000)], 5000], ['DRESSING', [item('DRESSING', 1, 0, 0)], 0]]),
+  ], 14000) });
+  check('bhel: ward → Room Rent; ICU and the unlisted group → one Other Unlisted Item row; ₹0 left out',
+    [ward.rows.map((r) => [r.serviceType, r.amount, r.remarks]), ward.checks.map((c) => c.message)],
+    [[['Room Rent', 3000, 'ROOM RENT'], ['Other Unlisted Item', 11000, 'ICU BED CHARGES, BED SIDE PROCEDURE']],
+      ['No summary bill selected — Bill No and the dates are on it, so they are left for you', 'DRESSING is ₹0 on the bill — left out of Other Unlisted Item']]);
+  check('bhel: no unlisted section — no Other Unlisted Item row', buildBhelClaim({ final: finalBill([section('ROOM RENT', [['ROOM RENT', [item('ROOM RENT', 1, 900, 900)], 900]])], 900) }).rows.map((r) => r.serviceType), ['Room Rent']);
+
+  // Without the summary bill: no Bill No or dates, said; another company is said; rounding each row is said.
+  const lone = buildBhelClaim({ final: { ...finalBill([
+    section('ROOM RENT', [['ROOM RENT', [item('ROOM RENT', 1, 100.4, 100.4)], 100.4]]),
+    section('INVESTIGATIONS', [['2D ECHO', [item('2D ECHO', 1, 200.4, 200.4)], 200.4]]),
+  ], 300.8), totals: { grandTotal: 300.8, netAmount: 301 } } });
+  check('bhel: no summary — Bill No and dates empty; a section named by its group (2D ECHO) still found; rounding said',
+    [lone.billNo, lone.visitDateTime, lone.rows.map((r) => [r.serviceType, r.amount]), lone.checks.map((c) => c.message)],
+    [null, null, [['Room Rent', 100], ['Cardiology BHEL', 200]], [
+      'No summary bill selected — Bill No and the dates are on it, so they are left for you',
+      'Rounding each row to whole rupees makes the rows ₹1 less than the bill\'s 301',
+    ]]);
+  checkTrue('bhel: another company flagged', buildBhelClaim({ final: finalBill([], 0), summary: { ...summary, patient: { ...summary.patient, company: 'COAL INDIA LTD' }, totals: { gross: 0 } } })
+    .checks.some((c) => /not BHEL/.test(c.message)));
+}
 // TGNPDCL: the hospital's own code is in no tariff list — kept apart, one row per item.
 const ownTg = buildTgnpdclClaim({ final: finalBill([
   section('BED SIDE PROCEDURE CHARGES', [['BED SIDE PROCEDURE CHARGES', [ownCoded('MID LINE CATHETERIZATION', 1, 15000), coded('ARTERIAL LINE PROCEDURE', '584', 1, 833)], 15833]]),
@@ -281,6 +629,13 @@ const cghsTg = buildTgnpdclClaim({ final: finalBill([section('PROCEDURE CHARGES'
 ], 53625]])], 53625) });
 check('tgnpdcl: unmarked CGHS code marked CGHS, printed marks kept', cghsTg.tabs.investigations.items.map((r) => [r.code, r.tariff, r.manual]),
   [['MG038', 'CGHS', false], ['423A', 'NIMS', false], ['CC008', 'NIMS', false], ['N1003', null, false]]);
+// Oxygen printed without a code gets the client's 2225/COMM (2026-11-09); a code printed on the line is kept.
+// 2225 is ₹135 an hour on the site, the bill counts days ("1 Day(s) X 3,240.00"): 4 days = 96 hours.
+const oxygenTg = buildTgnpdclClaim({ final: finalBill([section('OXYGEN', [['OXYGEN', [
+  { ...item('OXYGEN', 4, 3240, 12960), unit: 'Day' }, { ...coded('OXYGEN', '584', 1, 900), tariff: 'COMM', unit: 'Day' },
+], 13860]])], 13860) });
+check('tgnpdcl: oxygen without a code → 2225/COMM in hours (4 days = 96); a printed code kept', oxygenTg.tabs.investigations.items.map((r) => [r.code, r.tariff, r.qty, r.amountClaimed, r.manual]),
+  [['2225', 'COMM', 96, 12960, false], ['584', 'COMM', 1, 900, false]]);
 
 checkTrue('cil: other company flagged', buildCilClaim({ final: finalBill([], 0), summary: { invoiceNo: 'X', patient: { company: 'NORTHERN POWER' }, categories: [], totals: { gross: 0 }, issues: [] } })
   .checks.some((c) => /not Coal India/.test(c.message)));

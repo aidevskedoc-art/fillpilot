@@ -23,9 +23,10 @@ import { AuthService } from '../core/auth.service';
           <h1 class="text-2xl">Activity</h1>
           <p class="muted">Every form the extension filled (field labels and outcomes — never the values).</p>
         </div>
-        @if (auth.isAdmin()) {
+        @if (auth.isManager()) {
           <label class="flex items-center gap-2 text-sm">
-            <p-toggleswitch [ngModel]="allUsers()" (ngModelChange)="allUsers.set($event); loadSessions()" /> All users
+            <p-toggleswitch [ngModel]="allUsers()" (ngModelChange)="allUsers.set($event); loadSessions()" />
+            {{ auth.isAdmin() ? 'All users' : 'All users of ' + auth.user()?.unit }}
           </label>
         }
       </div>
@@ -34,18 +35,18 @@ import { AuthService } from '../core/auth.service';
         <p-tabs value="fills">
           <p-tablist>
             <p-tab value="fills">Form fills</p-tab>
-            @if (auth.isAdmin()) { <p-tab value="audit" (click)="loadAudit()">Audit log</p-tab> }
+            @if (auth.isManager()) { <p-tab value="audit" (click)="loadAudit()">Audit log</p-tab> }
           </p-tablist>
           <p-tabpanels>
             <p-tabpanel value="fills">
               <p-table [value]="sessions()" size="small" [rowHover]="true" [paginator]="sessions().length > 25" [rows]="25">
                 <ng-template #header>
-                  <tr><th>When</th>@if (allUsers()) { <th>User</th> }<th>Website / form</th><th>Document(s)</th><th>Detected</th><th>Filled</th><th>Reviewed</th><th>Failed</th><th></th></tr>
+                  <tr><th>When</th>@if (allUsers()) { <th>User</th>@if (auth.isAdmin()) { <th>Unit</th> } }<th>Website / form</th><th>Document(s)</th><th>Detected</th><th>Filled</th><th>Reviewed</th><th>Failed</th><th></th></tr>
                 </ng-template>
                 <ng-template #body let-s>
                   <tr>
                     <td class="whitespace-nowrap">{{ s.createdAt | date: 'd MMM y, HH:mm' }}</td>
-                    @if (allUsers()) { <td>{{ s.user }}</td> }
+                    @if (allUsers()) { <td>{{ s.user }}</td>@if (auth.isAdmin()) { <td class="mono">{{ s.unit || '—' }}</td> } }
                     <td><div>{{ s.formTitle || s.path }}</div><div class="muted text-xs mono">{{ s.origin }}</div></td>
                     <td class="text-sm">{{ s.documentNames.join(', ') }}</td>
                     <td>{{ s.detected }}</td>
@@ -55,10 +56,10 @@ import { AuthService } from '../core/auth.service';
                     <td class="text-right"><p-button icon="pi pi-list" [text]="true" [rounded]="true" (onClick)="open(s)" /></td>
                   </tr>
                 </ng-template>
-                <ng-template #emptymessage><tr><td colspan="9" class="muted text-center py-6">No forms filled yet.</td></tr></ng-template>
+                <ng-template #emptymessage><tr><td colspan="10" class="muted text-center py-6">No forms filled yet.</td></tr></ng-template>
               </p-table>
             </p-tabpanel>
-            @if (auth.isAdmin()) {
+            @if (auth.isManager()) {
               <p-tabpanel value="audit">
                 <p-table [value]="audit()" size="small" [rowHover]="true" [paginator]="audit().length > 50" [rows]="50">
                   <ng-template #header><tr><th>When</th><th>Action</th><th>Actor</th><th>Target</th><th>Details</th><th>IP</th></tr></ng-template>

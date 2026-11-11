@@ -4,8 +4,9 @@
 // or medicine per day. The person checks it here, saves it, and uploads it on
 // the SPDCL site themselves.
 //
-// Reached from any page: it does not touch the website. The files and the
-// result live in this view only — closing it or choosing other files drops them.
+// On the panel's "Excel & PDF" tab, whatever page is open: it does not touch the
+// website. The files and the result live in this view only — clearing it,
+// choosing other files or closing the panel drops them.
 
 import { useRef, useState } from 'react';
 import type { DragEvent } from 'react';
@@ -30,7 +31,8 @@ const fromInput = (value: string) => {
   return m ? `${m[3]}/${m[2]}/${m[1]}` : null;
 };
 
-export function SpdclView({ onClose, onError }: { onClose: () => void; onError: (message: string) => void }) {
+/** onClose: a Close button, when the view stands in for another (none on its own tab). */
+export function SpdclView({ onClose, onError }: { onClose?: () => void; onError: (message: string) => void }) {
   const input = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [sheet, setSheet] = useState<SpdclSheet | null>(null);
@@ -122,7 +124,7 @@ export function SpdclView({ onClose, onError }: { onClose: () => void; onError: 
       <section className="section">
         <div className="row-inline" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
           <div className="label" style={{ marginBottom: 0 }}>SPDCL Excel · from the HIS files</div>
-          <button className="btn btn-text btn-sm" onClick={onClose} disabled={busy}>Close</button>
+          {onClose && <button className="btn btn-text btn-sm" onClick={onClose} disabled={busy}>Close</button>}
         </div>
         <input ref={input} type="file" accept={`.xlsx,${XLSX}`} multiple hidden onChange={(e) => choose(e.target.files)} />
 

@@ -44,13 +44,22 @@ async function withTransaction(fn) {
 /**
  * Creates the target database (PGDATABASE) if it doesn't exist yet, via the
  * "postgres" maintenance database (a connection can't CREATE DATABASE while
- * pointed at a database that doesn't exist).
+ * pointed at a database that doesn't exist). The target is tried first: a
+ * production server usually lets the app reach its own database only
+ * (pg_hba.conf), not "postgres".
  */
 async function ensureDatabase() {
   const targetDb = process.env.PGDATABASE;
   if (!targetDb) throw new Error('PGDATABASE is not set');
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(targetDb)) {
     throw new Error(`PGDATABASE "${targetDb}" is not a safe identifier (letters/digits/underscore only)`);
+  }
+
+  try {
+    await pool.query('SELECT 1');
+    return; // it exists and this server may use it
+  } catch (err) {
+    if (err.code !== '3D000') throw err; // 3D000: the database does not exist — anything else (access, password, network) is reported as it is
   }
 
   const maintenancePool = new Pool(poolConfig(process.env.PGMAINTENANCE_DB || 'postgres', 1));
