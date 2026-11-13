@@ -183,6 +183,15 @@ function findField(pattern: string, locked = false): Control | null {
       if (c) return c;
     }
   }
+  // A <label> in a grid column or table cell of its own, its box in the next one (NTPC Sanjeevani, 2026-11-13):
+  // the first box after it in the row — tried last, so no page that worked before finds another box now.
+  const labels = Array.from(document.querySelectorAll('label')).filter((l) => isVisible(l) && r.test(norm(l.textContent)));
+  for (let level = 2; level <= 3; level++) {
+    for (const label of labels) {
+      const c = controlAfter(label, level, locked);
+      if (c) return c;
+    }
+  }
   return null;
 }
 
@@ -313,7 +322,7 @@ async function clickButton(pattern: string): Promise<string> {
   return `Clicked "${textOf(button)}"`;
 }
 
-async function setField(field: string, value: string, id?: string, calendar = false): Promise<string> {
+async function setField(field: string, value: string, id?: string, calendar = false, keys = false): Promise<string> {
   const byId = () => (id ? fieldById(id) : null);
   const control = await waitFor(() => {
     const c = byId();
@@ -334,6 +343,11 @@ async function setField(field: string, value: string, id?: string, calendar = fa
     }
     if (locked) throw new Error(`"${readable(field)}" is locked on the site — it cannot be typed into right now`);
     throw new Error(`Field "${readable(field)}" not found on the page — is the right tab open?`);
+  }
+  if (keys && (control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement)) {
+    const typed = enter(control, value);
+    if (typed) throw new Error(typed);
+    return `${readable(field)} = ${value}`;
   }
   const error = setValue(control, value);
   if (error) throw new Error(error);
@@ -1605,6 +1619,34 @@ function escapeKey(box: Element): void {
   }
 }
 
+/** Chrome's own date boxes (NTPC Sanjeevani): whatever they show, they take yyyy-mm-dd[Thh:mm]. */
+const isNativeDate = (box: HTMLInputElement) => box.type === 'date' || box.type === 'datetime-local';
+
+/** "03-11-2026 16:54" (or 03/11/2026) → "2026-11-03T16:54"; the date alone for a date box. Null: no time for a box that needs one. */
+function isoOf(value: string, withTime: boolean): string | null {
+  const m = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:\s+(\d{1,2}):(\d{2}))?/.exec(value.trim());
+  if (!m) return null;
+  const date = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  if (!withTime) return date;
+  return m[4] ? `${date}T${m[4].padStart(2, '0')}:${m[5]}` : null;
+}
+
+/** A date written into Chrome's own date box, with the events a person's choice would give. */
+function setNativeDate(box: HTMLInputElement, field: string, value: string): { message: string; warn: boolean } {
+  const iso = isoOf(value, box.type === 'datetime-local');
+  if (!iso) throw new Error(`"${readable(field)}" needs a date and a time, and the bill gives "${value}" — pick it in the site's calendar yourself`);
+  if (box.value === iso) return { message: `${readable(field)} = ${value} (already on the site)`, warn: false };
+  box.focus({ preventScroll: true });
+  setNativeValue(box, iso);
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  box.dispatchEvent(new Event('change', { bubbles: true }));
+  box.blur();
+  const ok = box.value === iso;
+  flash(box, ok ? OUTLINE.filled : OUTLINE.failed, 2500);
+  if (!ok) throw new Error(`${value} was given to the date box, but it holds "${box.value || 'nothing'}" — pick the date in the site's calendar yourself`);
+  return { message: `${readable(field)} = ${value}`, warn: false };
+}
+
 /**
  * A date-and-time box with a calendar: a click opens the calendar, the value is
  * typed key by key (the calendar reads what is typed), then the calendar's Apply
@@ -1613,13 +1655,28 @@ function escapeKey(box: Element): void {
  */
 async function setDateTime(field: string, value: string, id?: string): Promise<{ message: string; warn: boolean }> {
   const found = await waitFor(() => (id ? fieldById(id) : null) ?? findField(field) ?? findField(field, true), 3000);
-  if (!(found instanceof HTMLInputElement)) throw new Error(`Field "${readable(field)}" not found on the page — is the Upload Bill page open?`);
+  if (!(found instanceof HTMLInputElement)) throw new Error(`Field "${readable(field)}" not found on the page — is the bill page open?`);
   const box = found;
-  if (box.disabled) throw new Error(`"${readable(field)}" is locked on the site`);
+  if (box.disabled) {
+    // A date box the site keeps locked and fills itself (NTPC's Bill Date, from the discharge date — page structure
+    // 2026-11-13): given a moment to open or fill, then what it shows is checked against the bill.
+    await waitFor(() => !box.disabled || box.value, 1500);
+  }
+  if (box.disabled) {
+    const shown = box.value;
+    const iso = isNativeDate(box) ? isoOf(value, box.type === 'datetime-local') : null;
+    flash(box, OUTLINE.focus, 2500);
+    if (shown && (shown === iso || norm(shown) === value)) return { message: `${readable(field)} = ${value} (filled by the site)`, warn: false };
+    if (shown) return { message: `${readable(field)}: the site filled it with "${shown}" and keeps it locked — the bill says ${value}; check it`, warn: true };
+    throw new Error(`"${readable(field)}" is locked on the site and empty — the site may fill it from another box; if it stays empty, tell the developer`);
+  }
   if (norm(box.value) === value) return { message: `${readable(field)} = ${value} (already on the site)`, warn: false };
+  if (isNativeDate(box)) return setNativeDate(box, field, value);
 
   press(box);
   await sleep(PACE.part);
+  // A text box ("Select date and time") that turns into Chrome's own date box when clicked.
+  if (isNativeDate(box)) return setNativeDate(box, field, value);
   typeKeys(box, value);
   await sleep(PACE.part);
   const apply = await waitFor(() => pickerApply(), 1000);
@@ -1841,7 +1898,7 @@ export async function runActions(actions: PageAction[]): Promise<ActionResult[]>
       switch (a.type) {
         case 'clickTab': message = await clickTab(a.text, a.next); break;
         case 'clickButton': message = await clickButton(a.text); break;
-        case 'setField': message = await setField(a.field, a.value, a.id, a.calendar); break;
+        case 'setField': message = await setField(a.field, a.value, a.id, a.calendar, a.keys); break;
         case 'ensureRows': message = await ensureRows(a.headers, a.count, a.addButton); break;
         case 'setCell': message = await setCell(a.headers, a.row, a.column, a.value, a.optionMatch); break;
         case 'addTariffItem': ({ message, warn } = await addTariffItem(a.code, a.tariff, a.qty, a.amountClaimed, a.tariffOption, a.alternatives, a.moreTariffOptions)); break;
@@ -1882,7 +1939,7 @@ function rowParts(row: HTMLTableRowElement): HTMLElement[] {
 }
 
 /** What on the page holds a step's work now — looked up again, as the site may have redrawn it. */
-function spotElements(spot: PageSpot): HTMLElement[] {
+export function spotElements(spot: PageSpot): HTMLElement[] {
   switch (spot.kind) {
     case 'field': {
       const c = (spot.id ? fieldById(spot.id) : null) ?? findField(spot.field) ?? findField(spot.field, true);
@@ -1946,13 +2003,33 @@ export function showSpot(spot: PageSpot): boolean {
 
 // ------------------------------------------------------- read-only helpers
 
-/** IP number / admission number / patient name as printed anywhere on the page (hidden tabs included). */
+/** NTPC Sanjeevani's "Hospital IPD No:*" box, which the site fills with the patient's IP number. */
+const IPD_BOX = '^\\s*Hospital\\s*IPD\\s*No\\.?[\\s:*]*$';
+
+/**
+ * IP number / admission number / patient name as printed anywhere on the page (hidden tabs included),
+ * else the IP number in a "Hospital IPD No" box; and the hospital's user id after "Logged in as".
+ */
 export function readIdentity(): PageIdentity {
   const text = (document.body.textContent || '').replace(/\s+/g, ' ');
   const ip = /IP\s*(?:Number|No\.?)\s*[:\-]?\s*(\d{4,})/i.exec(text);
   const admission = /Admission\s*No\.?\s*[:\-]?\s*(\d{4,})/i.exec(text);
   const name = /Patient\s*Name\s*[:\-]?\s*([A-Z][A-Z .]{2,60}?)(?=\s*(?:Employee|IP|Date|Patient|Admission|Claim|$))/.exec(text);
-  return { ipNumber: ip ? ip[1] : null, admissionNumber: admission ? admission[1] : null, patientName: name ? norm(name[1]) : null };
+  // "Logged in as YASODHA HEALTHCARE SERVICES PVT. LTD.(HITECH CITY)(0610),HYDERABAD (Telangana)": the number in brackets.
+  // No \b after "as": the page breaks the line there (<br>), so its text runs on — "Logged in asYASODHA…".
+  const login = /Logged\s*in\s*as.{0,200}?\(\s*(\d{2,10})\s*\)/i.exec(text);
+  let ipNumber = ip ? ip[1] : null;
+  if (!ipNumber && /Hospital\s*IPD\s*No/i.test(text)) {
+    const box = findField(IPD_BOX) ?? findField(IPD_BOX, true);
+    const value = box && !(box instanceof HTMLSelectElement) ? norm(box.value) : '';
+    if (/^\d{4,}$/.test(value)) ipNumber = value;
+  }
+  return {
+    ipNumber,
+    admissionNumber: admission ? admission[1] : null,
+    patientName: name ? norm(name[1]) : null,
+    ...(login ? { loginId: login[1] } : {}),
+  };
 }
 
 /** "div.step.active[role=tab] < ul.steps < …" — the element and up to five ancestors. */

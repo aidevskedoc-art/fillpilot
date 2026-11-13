@@ -12,7 +12,10 @@ export interface PlanStep {
   title: string;
   /** What will be filled, one line each, for the person to check first. */
   preview: string[];
-  /** Things this step cannot fill — left for the person. */
+  /**
+   * General reminders for this tab (declarations, reports, pouches). The bill's
+   * items the person must enter or check are in the review list (tgnpdcl-review.ts).
+   */
   manual: string[];
   actions: PageAction[];
   /** The bills hold no data for this tab — only the tab can be opened. */
@@ -60,6 +63,14 @@ const TARIFF_OPTION: Record<string, string | string[]> = {
   COMM: '^EHS\\s*Ax\\s*-?\\s*VI\\s*$',
   CGHS: '^CGHS\\s*\\(\\s*2025\\s*\\)\\s*[-‐‑–—]?\\s*Tier\\s*[-‐‑–—]?\\s*(I|1)\\s*$',
   EHS: ['^EHS\\s*Ax\\s*-?\\s*III\\s*$', '^EHS\\s*Ax\\s*-?\\s*II\\s*$'],
+};
+
+/** The same, as the site shows it — for the person entering a code by hand. */
+export const TARIFF_NAME: Record<string, string> = {
+  NIMS: 'EHS Ax-V',
+  COMM: 'EHS Ax-VI',
+  CGHS: 'CGHS(2025)-Tier I',
+  EHS: 'EHS Ax-III (or EHS Ax-II)',
 };
 
 /** Captions this profile relies on — located in the page outline saved when a step fails. */
@@ -121,10 +132,8 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
   const coded = investigations.items
     .filter((i) => !i.manual && i.code)
     .sort((a, b) => Number(!optionFor(a.tariff)) - Number(!optionFor(b.tariff)) || (a.tariff || '').localeCompare(b.tariff || ''));
-  const uncoded = investigations.items.filter((i) => i.manual || !i.code);
-  // The hospital's own codes (YSSH): no tariff list has them — left for the person until the site's non-tariff entry is profiled.
-  const own = investigations.ownItems ?? [];
-  const unmapped = [...new Set(coded.filter((i) => !optionFor(i.tariff)).map((i) => i.tariff || 'no tariff'))];
+  // Items without a usable code, the hospital's own codes (YSSH) and codes whose mark the
+  // site has no tariff type for are left for the person: the review list says which.
   const invActions: PageAction[] = [
     { type: 'clickTab', text: TAB.investigations, next: NEXT, label: 'Open "2. Investigations and Procedures"' },
     ...coded.map((i): PageAction => ({
@@ -167,23 +176,14 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
         `Doctors: ${room.numberOfDoctors}`,
         ...room.doctors.map((d) => `• ${d.name} — ${d.days} day(s)`),
       ],
-      manual: [
-        ...(room.wards.length ? ['Check "Ward Occupied" — the bill only says "Room rent", so the ward is chosen only when its rate equals the bill\'s'] : []),
-        ...(room.doctors.filter((d) => d.review).length ? ['Add specializations the bill does not show'] : []),
-      ],
+      manual: [],
       actions: roomActions,
     },
     {
       key: 'investigations',
       title: '2. Investigations and Procedures',
       preview: coded.map((i) => `${i.code}${orReadings(i.alternatives)}${i.tariff ? ` (${i.tariff})` : ''} —${i.description}${i.lines > 1 ? ` ×${i.lines} lines` : ''} — qty ${i.qty}, ${rupees(i.amountClaimed)}${i.review ? '  ⚠' : ''}`),
-      manual: [
-        ...unmapped.map((t) => `${coded.filter((i) => (i.tariff || 'no tariff') === t).length} code(s) are marked "${t}" on the bill — the site has no tariff type of that name, so they are not added (listed in the result)`),
-        ...own.map((i) => `${i.code} (hospital's own code) ${i.description} — ${i.qty} × ${rupees(i.rate)} = ${rupees(i.amountClaimed)} — in no tariff list: enter it as a non-tariff item${i.notes.length ? ` (${i.notes.join('; ')})` : ''}`),
-        ...uncoded.map((i) => `${i.description} — qty ${i.qty}, ${rupees(i.amountClaimed)} — ${i.notes[i.notes.length - 1] || 'enter manually'}`),
-        ...(investigations.implants ? [`Implants ${rupees(investigations.implants.amount)} — pick department and implant items, upload the invoice`] : []),
-        'Tick the compliance declaration and upload investigation reports',
-      ],
+      manual: ['Tick the compliance declaration and upload investigation reports'],
       actions: invActions,
     },
     {
@@ -191,7 +191,6 @@ export function buildPlan(claim: TgnpdclClaim): PlanStep[] {
       title: '3. Pharmacy',
       preview: pharmacy.rows.map((r) => `${dayMonthYear(r.date)} — ${r.name} — ${r.qty} × ${rupees(r.rate)} = ${rupees(r.amount)}${r.pouch ? ' · pouch' : ''}`),
       manual: [
-        ...(pharmacy.note ? [pharmacy.note] : []),
         ...(pouches.length
           ? [`Enclose the pouches of ${pouches.length} item(s) costing ₹2,000 or more each (${pouches.reduce((n, r) => n + r.qty, 0)} pouch(es)) with the original bill`]
           : []),

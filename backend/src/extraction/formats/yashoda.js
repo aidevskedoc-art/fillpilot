@@ -584,7 +584,8 @@ function parseFinalBill(pages) {
   for (const s of sections) {
     for (const g of s.groups) {
       for (const it of g.items) {
-        for (const message of it.issues) issues.push({ level: 'warning', message: `${it.description || g.name}: ${message}`, page: it.page });
+        // item: true — one line's own problem (also in it.issues); a claim that lists lines can say it on its line instead.
+        for (const message of it.issues) issues.push({ level: 'warning', message: `${it.description || g.name}: ${message}`, page: it.page, item: true });
       }
     }
   }
@@ -780,6 +781,33 @@ function attachAmountLines(lines) {
 /**
  * pages: [{ page, width, lines }] → structured summary bill.
  */
+/**
+ * The summary bill's header, printed again at the top of every page (GST NO, NAME, IP NO, COMPANY…) — never a
+ * charge, though a second page starts in the middle of the charges (NTPC, IP 133130, 2026-11-13).
+ */
+const SUMMARY_HEADER = /^(GST\s*N[O0]|PAN\s*N[O0]|NAME\s*[:;]|[I1l|]P\s*N[O0]|C[O0]NSULTANT|C[O0]MPANY|GSTIN|PT\s*A[DH]+A+R|DISCH|AGE\s*\/|YH\s*N[O0]|D\.?\s*[O0]\.?\s*[AD]\s*[:;]|T[O0]KEN|BILL\s+OF\s+SUPPLY|YASHODA|PAGE\s+\d)/i;
+
+/**
+ * A line's amount (its last segment) and the text before it. An amount in lakhs that OCR split in two
+ * — "9," | "48,215.31", or "9" | ",48,215.31" (NTPC, IP 133130) — is put back together: the comma shows
+ * the digits belong to it.
+ */
+function lineAmount(segments) {
+  const last = segments[segments.length - 1];
+  const before = segments.slice(0, -1).map((s) => s.text).join(' ').trim();
+  const amount = last ? parseAmount(last.text) : null;
+  const tail = last ? last.text.trim() : '';
+  const m = /(?:^|\s)(\d{1,2})\s*(,?)$/.exec(before);
+  if (amount != null && m && (m[2] || tail.startsWith(',')) && /^,?\d{2},\d{3}(\.\d{1,2})?$/.test(tail)) {
+    const joined = parseAmount(`${m[1]},${tail.replace(/^,/, '')}`);
+    if (joined != null) return { amount: joined, label: before.slice(0, m.index).trim() };
+  }
+  return { amount, label: before };
+}
+
+/** "9,48,215.31" read as 48,215.31: the leading digits lost in reading — the whole ends in the same digits. */
+const lostLead = (whole, part) => whole != null && part != null && whole > part && whole.toFixed(2).endsWith(part.toFixed(2));
+
 function parseSummaryBill(pagesIn) {
   const pages = pagesIn.map((p) => ({ ...p, lines: attachAmountLines(p.lines) }));
   const issues = [];
@@ -835,9 +863,19 @@ function parseSummaryBill(pagesIn) {
         continue;
       }
       const last = line.segments[line.segments.length - 1];
-      const amount = last ? parseAmount(last.text) : null;
-      const label = line.segments.slice(0, -1).map((s) => s.text).join(' ').trim();
+      const { amount, label } = lineAmount(line.segments);
 
+      // A bill with GST (NTPC, IP 133130, 2026-11-13): "GST: 1,995.00", then "TOTAL AMOUNT + GST : 9,50,210.00" —
+      // the total with GST, not the rounded total (totals.gst, totals.withGst; set only when printed).
+      if (/^G\s*S\s*T\s*:/i.test(text)) {
+        totals.gst = amount;
+        continue;
+      }
+      if (/TOTAL\s+AMOUNT\s*\+\s*G\s*S\s*T/i.test(text)) {
+        inCharges = false;
+        totals.withGst = amount;
+        continue;
+      }
       // First "TOTAL AMOUNT" is the exact sum (paise), the second the rounded bill amount.
       if (/TOTAL\s+AMOUNT/i.test(text)) {
         inCharges = false;
@@ -861,7 +899,7 @@ function parseSummaryBill(pagesIn) {
         continue;
       }
       if (inCharges && label && line.segments.length >= 2) {
-        if (/^AMOUNT$/i.test(label) || /^SAC/i.test(label)) continue;
+        if (/^AMOUNT$/i.test(label) || /^SAC/i.test(label) || SUMMARY_HEADER.test(label)) continue;
         // An unreadable amount leaves fragments behind ("HAEMATOLOGY 14 O" for 6,144.00).
         const name = (amount == null ? label.replace(/(\s+[\dIlOo,.']+)+$/, '') : label).replace(/\s+/g, ' ');
         categories.push({ name, amount, amountRaw: last.text, page });
@@ -877,6 +915,18 @@ function parseSummaryBill(pagesIn) {
   // reported again as a wrong total; a claim builder can confirm them from the
   // final bill (unreadableCharges).
   const unreadable = categories.filter((c) => c.amount == null);
+  // The total lost its lakhs in reading (9,48,215.31 → 48,215.31) while every charge was read: the charges' sum is the total.
+  const charged = sum(categories.map((c) => c.amount));
+  if (!unreadable.length && categories.length && lostLead(charged, totals.gross)) {
+    issues.push({ level: 'info', message: `Total amount read as ${totals.gross.toFixed(2)} — its first digits were lost in reading; the charges add up to ${charged.toFixed(2)}, used`, page: totalsPage });
+    totals.gross = charged;
+  }
+  // Likewise the credit (9,40,708.00 → 40,708): total − paid ends in the same digits.
+  if (totals.credit?.amount != null && totals.total != null && totals.paid != null && lostLead(round2(totals.total - totals.paid), totals.credit.amount)) {
+    const owed = round2(totals.total - totals.paid);
+    issues.push({ level: 'info', message: `Credit read as ${totals.credit.amount.toFixed(2)} — its first digits were lost in reading; total − paid is ${owed.toFixed(2)}, used`, page: totalsPage });
+    totals.credit.amount = owed;
+  }
   let unreadableCharges = null;
   if (unreadable.length === 1 && totals.gross != null) {
     const c = unreadable[0];
@@ -918,6 +968,9 @@ function parseSummaryBill(pagesIn) {
   }
   if (totals.rounded != null && Math.abs(Math.round(totals.gross) - totals.rounded) > 1) {
     issues.push({ level: 'error', message: `Rounded total ${totals.rounded.toFixed(2)} does not match ${totals.gross.toFixed(2)}`, page: totalsPage });
+  }
+  if (totals.withGst != null && totals.gst != null && totals.gross != null && Math.abs(round2(totals.gross + totals.gst) - totals.withGst) > 1) {
+    issues.push({ level: 'error', message: `Total amount + GST reads ${totals.withGst.toFixed(2)}, but ${totals.gross.toFixed(2)} + ${totals.gst.toFixed(2)} = ${round2(totals.gross + totals.gst).toFixed(2)}`, page: totalsPage });
   }
   if (totals.total != null && totals.credit?.amount != null && totals.paid != null && !sameAmount(totals.credit.amount + totals.paid, totals.total)) {
     issues.push({ level: 'error', message: `Credit ${totals.credit.amount} + paid ${totals.paid} ≠ total ${totals.total}`, page: totalsPage });

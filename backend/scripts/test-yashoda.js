@@ -14,6 +14,7 @@ const spdcl = require('../src/claims/spdcl');
 const { buildPmjayClaim } = require('../src/claims/pmjay');
 const { buildCilClaim } = require('../src/claims/cil');
 const { buildBhelClaim } = require('../src/claims/bhel');
+const { buildNtpcClaim } = require('../src/claims/ntpc');
 const { buildAliasIndex, seedAliases } = require('../src/alias-index');
 const { ocrAvailable } = require('../src/ocr');
 const { check, checkTrue, done } = require('./lib/check');
@@ -142,6 +143,129 @@ check('quantity OCR-spoilt is not parsed (the bill reader then uses amount ÷ ra
     L(660, [300, 'TOTAL:'], [500, '1,500.00']),
   ] }]);
   check('fully credited summary: invoice repaired, paid 0, no note', [credited.invoiceNo, credited.totals.paid, credited.totals.credit, credited.issues], ['ICO6076856', 0, { from: 'COAL INDIA LTD', amount: 1500 }, []]);
+
+  // An NTPC summary bill (2026-11-13), made up: amounts after NTPC's discount ("(1,650.00 - 20.00 %) 1,320.00"), then
+  // GST and "TOTAL AMOUNT + GST" — the total with GST, not a rounded total that disagrees.
+  const ntpcSummary = parseSummaryBill([{ page: 1, width: 600, lines: [
+    L(800, [100, 'BILL OF SUPPLY / INVOICE NO: ICO6000001']),
+    L(790, [50, 'NAME: MR. TEST PATIENT'], [400, 'AGE / SEX: 60 Y / M']),
+    L(780, [50, 'IP NO: 100001'], [400, 'YH NO: 1']),
+    L(770, [50, 'COMPANY: NATIONAL THERMAL POWER CORPORATION'], [400, 'D.O.A: 20-10-2026 16:57']),
+    L(765, [400, 'D.O.D: 03-11-2026 16:54']),
+    L(760, [50, 'Description of Healthcare Services']),
+    L(750, [50, 'ROOM RENT'], [500, '39,900.00']),
+    L(745, [50, 'INTENSIVE CARE UNIT'], [500, '81,200.00']),
+    L(740, [50, 'SDP TRANSFUSSION'], [250, '(1,650.00 - 20.00 %)'], [500, '1,320.00']),
+    L(735, [50, 'DOCTOR FEES'], [500, '38,400.00']),
+    L(730, [50, 'HAEMATOLOGY'], [250, '(51,369.00 - 25.00 %)'], [500, '38,526.75']),
+    L(725, [50, 'PHARMACY'], [500, '2,62,267.81']),
+    L(720, [50, 'SURGERY CHARGES'], [250, '(70,000.00 - 20.00 %)'], [500, '56,000.00']),
+    L(710, [300, 'TOTAL AMOUNT:'], [500, '5,17,614.56']),
+    L(700, [400, 'GST:'], [500, '1,995.00']),
+    L(690, [250, 'TOTAL AMOUNT + GST :'], [500, '5,19,609.56']),
+    L(680, [150, 'CREDIT FROM NATIONAL THERMAL POWER CORPORATION:'], [500, '5,10,107.56']),
+    L(670, [350, 'PAID AMOUNT:'], [500, '9,502.00']),
+    L(660, [400, 'TOTAL:'], [500, '5,19,609.56']),
+  ] }]);
+  check('summary with GST: GST and the total with it read; no "rounded total" error',
+    [ntpcSummary.totals.gross, ntpcSummary.totals.gst, ntpcSummary.totals.withGst, ntpcSummary.totals.rounded, ntpcSummary.issues], [517614.56, 1995, 519609.56, null, []]);
+  const ntpc = buildNtpcClaim({ summary: ntpcSummary });
+  check('NTPC: dates, bill number, bill date = D.O.D', [ntpc.ipNo, ntpc.billNo, ntpc.admissionDateTime, ntpc.dischargeDateTime, ntpc.billDate],
+    ['100001', 'ICO6000001', '20-10-2026 16:57', '03-11-2026 16:54', '03-11-2026']);
+  check('NTPC: each line in its box, in the screen\'s order; ICU and SDP in Charges Others', ntpc.charges.map((c) => [c.key, c.amount, c.lines]), [
+    ['room', 39900, ['ROOM RENT']],
+    ['consultation', 38400, ['DOCTOR FEES']],
+    ['drug', 262267.81, ['PHARMACY']],
+    ['surgery', 56000, ['SURGERY CHARGES']],
+    ['tests', 38526.75, ['HAEMATOLOGY']],
+    ['others', 82520, ['INTENSIVE CARE UNIT', 'SDP TRANSFUSSION']],
+  ]);
+  // Every line of IP 133130's summary bill (2026-11-13; names and amounts only): "Anesthesia charges and so on — it is in our summary".
+  const allLines = buildNtpcClaim({ summary: {
+    invoiceNo: 'ICO1', totals: { gross: 948215.31 }, issues: [],
+    patient: { ipNo: '1', company: 'NATIONAL THERMAL POWER CORPORATION', admission: { date: '2026-10-20', time: '16:57' }, discharge: { date: '2026-11-03', time: '16:54' } },
+    categories: [
+      ['ROOM RENT', 39900], ['INTENSIVE CARE UNIT', 81200], ['SDP TRANSFUSSION (1,650.00 - 20.00 %)', 1320], ['ALPHA BED (10,000.00 - 20.00 %)', 8000],
+      ['ANAESTHESIOLOGY (24,500.00 - 20.00 %)', 19600], ['ASSISTANT SURGEON (24,500.00 - 20.00 %)', 19600], ['BED SIDE PROCEDURE CHARGES (4,100.00 - 20.00 %)', 3280],
+      ['BLOOD TRANSFUSION (8,100.00 - 20.00 %)', 6480], ['CARDIOLOGY (5,559.00 - 25.00 %)', 4169.25], ['CATHETERIZATION CHARGES (2,000.00 - 20.00 %)', 1600],
+      ['DOCTOR FEES', 38400], ['INSTRUMENT CHARGES', 21450], ['HAEMATOLOGY GROUPING (532.00 - 25.00 %)', 399], ['PARASITOLOGY (5,300.00 - 25.00 %)', 3975],
+      ['TRANSFUSION MEDICINE (33,685.00 - 25.00 %)', 25263.75], ['CLINICAL BIOCHEMISTRY (97,442.00 - 25.00 %)', 73081.5], ['HAEMATOLOGY (51,369.00 - 25.00 %)', 38526.75],
+      ['MOLECULAR BIOLOGY (91,764.00 - 25.00 %)', 68823], ['MICROBIOLOGY (11,779.00 - 25.00 %)', 8834.25], ['CLINICAL PATHOLOGY (513.00 - 25.00 %)', 384.75],
+      ['HISTOPATHOLOGY (9,828.00 - 25.00 %)', 7371], ['SEROLOGY (11,415.00 - 25.00 %)', 8561.25], ['OPERATION THEATRE CHARGES (20,500.00 - 20.00 %)', 16400],
+      ['PHARMACY', 262267.81], ['PHYSIOTHERAPY', 7266], ['PROCEDURE CHARGES (14,000.00 - 20.00 %)', 11200], ['RADIOGRAPH (5,059.00 - 25.00 %)', 3794.25],
+      ['NUCLEAR MEDICINE (39,063.00 - 25.00 %)', 29297.25], ['ULTRA SOUND (18,275.00 - 25.00 %)', 13706.25], ['CT SCAN (42,095.00 - 25.00 %)', 31571.25],
+      ['IMAGING (33,724.00 - 25.00 %)', 25293], ['RBS WITH GLUCOMETER (14,000.00 - 20.00 %)', 11200], ['SURGERY CHARGES (70,000.00 - 20.00 %)', 56000],
+    ].map(([name, amount]) => ({ name, amount, page: 1 })),
+  } });
+  check('NTPC: a whole bill — anaesthesia, surgery, OT, procedures and tests in their own boxes', allLines.charges.map((c) => [c.key, c.amount, c.lines.length]), [
+    ['room', 39900, 1], ['procedure', 16080, 3], ['consultation', 38400, 1], ['drug', 262267.81, 1], ['ot', 16400, 1], ['surgery', 75600, 2],
+    ['anesthesia', 19600, 1], ['tests', 354251.5, 17], ['others', 125716, 6],
+  ]);
+  check('NTPC: what goes to Charges Others on that bill', allLines.charges.find((c) => c.key === 'others').lines,
+    ['INTENSIVE CARE UNIT', 'SDP TRANSFUSSION', 'ALPHA BED', 'BLOOD TRANSFUSION', 'INSTRUMENT CHARGES', 'PHYSIOTHERAPY']);
+  check('NTPC: the boxes still come to the bill\'s total', [allLines.totals.boxes, allLines.checks], [948215.31, []]);
+  check('NTPC: the boxes are the bill\'s total; GST in no box is said', [ntpc.totals.boxes, ntpc.checks.map((c) => [c.level, /^GST 1995 is in no charge box/.test(c.message)])],
+    [517614.56, [['warning', true]]]);
+  const ntpcOther = buildNtpcClaim({
+    summary: {
+      invoiceNo: 'ICO1', patient: { ipNo: '1', company: 'BHARAT HEAVY ELECTRICALS LTD', admission: { date: '2026-10-01', time: null }, discharge: null },
+      categories: [
+        { name: 'MEDICAL APPLIANCES', amount: 5000 }, { name: 'NUCLEAR MEDICINE (39,063.00 - 25.00 %)', amount: 29297.25 }, { name: 'WARD CHARGES / ICU BED CHARGES', amount: 1000 },
+      ],
+      totals: { gross: 35297.25 }, issues: [],
+    },
+    final: { patient: { ipNo: '2' } },
+  });
+  check('NTPC: medical appliances are implants; nuclear medicine is a test, no drug; ICU beds are no room', ntpcOther.charges.map((c) => [c.key, c.amount, c.lines]), [
+    ['implants', 5000, ['MEDICAL APPLIANCES']], ['tests', 29297.25, ['NUCLEAR MEDICINE']], ['others', 1000, ['WARD CHARGES / ICU BED CHARGES']],
+  ]);
+  // The same bill on two pages, as OCR read IP 133130's (2026-11-13): page 2 repeats the header in the middle of the
+  // charges, TOTAL AMOUNT comes in two pieces ("5," | "17,614.56"), the credit without its lakhs (10,107.56).
+  const twoPages = (totalLine) => parseSummaryBill([
+    { page: 1, width: 600, lines: [
+      L(800, [100, 'BILL OF SUPPLY / INVOICE NO: ICO6000001']),
+      L(780, [50, 'IP NO: 100001'], [400, 'YH NO: 1']),
+      L(760, [50, 'Description of Healthcare Services']),
+      L(750, [50, 'ROOM RENT'], [500, '39,900.00']),
+      L(745, [50, 'INTENSIVE CARE UNIT'], [500, '81,200.00']),
+      L(740, [50, 'SDP TRANSFUSSION'], [250, '(1,650.00 - 20.00 %)'], [500, '1,320.00']),
+      L(735, [50, 'DOCTOR FEES'], [500, '38,400.00']),
+      L(730, [50, 'HAEMATOLOGY'], [250, '(51,369.00 - 25.00 %)'], [500, '38,526.75']),
+      L(725, [50, 'PHARMACY'], [500, '2,62,267.81']),
+    ] },
+    { page: 2, width: 600, lines: [
+      L(805, [50, 'GST NO: 36AABCD6598G1ZC'], [400, 'PAN NO: AABCD6598G']),
+      L(800, [100, 'BILL OF SUPPLY / INVOICE NO: ICO6000001']),
+      L(790, [50, 'NAME: MR. TEST PATIENT'], [400, 'AGE / SEX: 60 Y / M']),
+      L(780, [50, 'IP NO: 100001'], [400, 'YH NO: 1']),
+      L(775, [50, 'COMPANY: NATIONAL THERMAL POWER CORPORATION'], [400, 'D.O.A: 20-10-2026 16:57']),
+      L(770, [50, 'GSTIN:'], [400, 'D.O.D: 03-11-2026 16:54']),
+      L(765, [50, 'PT ADHAAR NO:'], [400, 'TOKEN No:']),
+      L(760, [50, 'Description of Healthcare Services']),
+      L(750, [50, 'SURGERY CHARGES'], [250, '(70,000.00 - 20.00 %)'], [500, '56,000.00']),
+      totalLine,
+      L(735, [400, 'GST:'], [500, '1,995.00']),
+      L(730, [250, 'TOTAL AMOUNT + GST :'], [500, '5,19,609.56']),
+      L(725, [150, 'CREDIT FROM NATIONAL THERMAL POWER CORPORATION:'], [500, '10,107.56']),
+      L(720, [350, 'PAID AMOUNT:'], [500, '9,502.00']),
+      L(715, [400, 'TOTAL:'], [500, '5,19,609.56']),
+    ] },
+  ]);
+  const splitTotal = twoPages(L(740, [300, 'TOTAL AMOUNT:'], [470, '5,'], [500, '17,614.56']));
+  check('summary on two pages: the header again on page 2 is no charge; a total in two pieces joined; the credit\'s lost lakhs put back', [
+    splitTotal.categories.map((c) => c.name.split(' (')[0]), splitTotal.totals.gross, splitTotal.totals.credit, splitTotal.issues.map((i) => [i.level, i.message.split(' — ')[0]]),
+  ], [
+    ['ROOM RENT', 'INTENSIVE CARE UNIT', 'SDP TRANSFUSSION', 'DOCTOR FEES', 'HAEMATOLOGY', 'PHARMACY', 'SURGERY CHARGES'], 517614.56,
+    { from: 'NATIONAL THERMAL POWER CORPORATION', amount: 510107.56 }, [['info', 'Credit read as 10107.56']],
+  ]);
+  const lost = twoPages(L(740, [300, 'TOTAL AMOUNT:'], [500, '17,614.56']));
+  check('summary: a total that lost its lakhs is the charges\' sum, said', [lost.totals.gross, lost.issues.map((i) => [i.level, i.message.split(' — ')[0]])],
+    [517614.56, [['info', 'Total amount read as 17614.56'], ['info', 'Credit read as 10107.56']]]);
+  check('NTPC: the bill total and boxes from the repaired summary, nothing unread', [buildNtpcClaim({ summary: splitTotal }).totals.billTotal, buildNtpcClaim({ summary: splitTotal }).checks.map((c) => c.level)],
+    [517614.56, ['info', 'warning']]);
+  check('NTPC: another patient\'s final bill, a bill not made out to NTPC, a date without time, no D.O.D',
+    [ntpcOther.admissionDateTime, ntpcOther.dischargeDateTime, ntpcOther.billDate, ntpcOther.checks.map((c) => [c.level, c.message.split(' ').slice(0, 3).join(' ')])],
+    ['01-10-2026', null, null, [['error', 'The bills are'], ['warning', 'The summary bill'], ['warning', 'D.O.D not read'], ['warning', 'D.O.A has no']]]);
 
   // The client's bill (2026-10-19) by hand, as OCR may read it: I and 1, O and 0 swapped in every field.
   const nimsBill = parseFinalBill([{ page: 1, width: 600, lines: [
@@ -363,6 +487,9 @@ check('quantity OCR-spoilt is not parsed (the bill reader then uses amount ÷ ra
     returnsClaim.tabs.pharmacy.rows.map((r) => [r.name, r.rate, r.qty, r.amount]),
     returnsClaim.checks.filter((c) => /pharmacy|paise/i.test(c.message)).map((c) => c.level),
   ], [[['PAN 40 TAB', 5, 6, 30], ['DOLO 650', 1.67, 6, 10.02]], ['warning', 'error', 'info']]);
+  check('tgnpdcl pharmacy: the pharmacy bill\'s checks are said on the Pharmacy tab', returnsClaim.checks.filter((c) => /pharmacy|paise/i.test(c.message)).map((c) => c.tab ?? null),
+    ['pharmacy', 'pharmacy', 'pharmacy']);
+  check('tgnpdcl pharmacy alone: its checks name no tab (the "Excel & PDF" tab lists them all)', buildTgnpdclPharmacy(returns).checks.map((c) => c.tab ?? null), [null, null, null]);
 
   // The HIS pharmacy Excel instead of the PDF: the same rows.
   const hisRows = [
@@ -670,6 +797,44 @@ check('tgnpdcl: same name at another rate is not joined', threeLines({ ...coded(
 check('tgnpdcl: the same item under two codes — a line without a code is left for the person',
   threeLines(prbc(null, null), [{ ...coded('PACKED RED BLOOD CELLS', '584', 1, 530), tariff: 'COMM' }]),
   [['41A', 'NIMS', 2, 1060, false, false], [null, null, 1, 530, true, true], ['584', 'COMM', 1, 530, false, false]]);
+
+// Where each check is said (the client, 2026-11-13: the list of red and amber lines confused the staff):
+// a line's own problem goes with its item, in the tab it is entered on (the panel's "To review" card);
+// a check about the whole bill stays in the list at the top (no tab).
+const misreadNote = 'Quantity read as 2, but 1590 ÷ 530 = 3 and the sub total agrees — 3 used; check it on the bill';
+const placed = buildTgnpdclClaim({ final: { ...finalBill([
+  section('ROOM RENT', [['ROOM RENT', [item('GENERAL WARD', 3, null, 6000)], 6000]]),
+  section('DOCTOR VISIT CHARGES', [['DOCTOR VISIT CHARGES', [{ ...item('DR. A KUMAR', 2, 500, 1000), issues: ['Quantity "Z" unreadable — worked out as amount ÷ rate = 2'] }], 1000]]),
+  section('BLOOD BANK', [['BLOOD BANK', [
+    { ...coded('HAEMOGRAM', '423A', 1, 225), tariff: 'NIMS' },
+    { ...coded('PACKED RED BLOOD CELLS', '41A', 3, 1590), tariff: 'NIMS', rate: 530, issues: [misreadNote] },
+    { ...coded('PACKED RED BLOOD CELLS', '41A', 1, 530), tariff: 'NIMS' },
+  ], 2345]]),
+  section('PHARMACY', [['PHARMACY', [item('PHARMACY', 1, null, 800)], 800]]),
+], 10145), issues: [
+  { level: 'error', message: 'Sections add up to 1.00 but the grand total reads 2.00', page: 1 },
+  // The reader lists each line's problems too (item: true); the claim says them with the item instead.
+  { level: 'warning', message: `PACKED RED BLOOD CELLS: ${misreadNote}`, page: 1, item: true },
+] } });
+check('tgnpdcl checks: each with its tab and item — ward, doctor, the merged row, pharmacy; the bill-wide ones without',
+  placed.checks.map((c) => [c.level, c.tab ?? null, c.item ?? null]), [
+    ['error', null, null],
+    ['warning', 'room', { list: 'wards', index: 0 }],
+    ['warning', 'room', { list: 'doctors', index: 0 }],
+    ['warning', 'investigations', { list: 'items', index: 1 }],
+    ['warning', 'pharmacy', { list: 'pharmacy' }],
+    ['warning', null, null],
+  ]);
+check('tgnpdcl checks: a line\'s problem said once, with the line\'s name and page',
+  placed.checks.filter((c) => c.message.includes(misreadNote)).map((c) => [c.message, c.at]),
+  [[`Final bill: PACKED RED BLOOD CELLS: ${misreadNote}`, { doc: 'final', page: 1 }]]);
+const ownPlaced = buildTgnpdclClaim({ final: finalBill([
+  section('OTHER CHARGES', [['OTHER CHARGES', [{ ...coded('DIET CONSULTATION', 'YSSH12', 1, 300), ownCode: true, issues: ['Code "YSSH12" may be misread'] }], 300]]),
+  section('IMPLANTS', [['IMPLANTS', [item('CORONARY STENT', 1, null, 50000)], 50000]]),
+], 50300) });
+check('tgnpdcl checks: the hospital\'s own code, no room rent, implants',
+  ownPlaced.checks.map((c) => [c.tab ?? null, c.item ?? null]),
+  [['investigations', { list: 'ownItems', index: 0 }], ['room', null], ['investigations', { list: 'implants' }], [null, null]]);
 
 checkTrue('cil: other company flagged', buildCilClaim({ final: finalBill([], 0), summary: { invoiceNo: 'X', patient: { company: 'NORTHERN POWER' }, categories: [], totals: { gross: 0 }, issues: [] } })
   .checks.some((c) => /not Coal India/.test(c.message)));

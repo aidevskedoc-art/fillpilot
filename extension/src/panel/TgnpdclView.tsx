@@ -6,19 +6,25 @@
 // The bill is not stored anywhere on the server: it is read there and handed
 // back, and lives in this browser session (bill-session.ts) only until it is
 // cleared, the person signs out, or the browser closes.
+//
+// Under each tab, a review list (ReviewList, tgnpdcl-review.ts) says what the
+// person must enter or check there; the step-by-step log is folded away. The
+// ready bar counts what is left on the whole bill.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent } from 'react';
 import type { TgnpdclClaim } from '../../../web/projects/shared/src/api-types';
-import type { ActionResult, PageAction, PageIdentity } from '../../../web/projects/shared/src/page-contract';
+import type { ActionResult, PageAction, PageIdentity, PageMark } from '../../../web/projects/shared/src/page-contract';
 import { activityLog } from './activity-log';
 import { api, messageOf } from './api';
-import { billSession } from './bill-session';
+import { billSession, tgnpdclReviewed } from './bill-session';
 import { BillChecks, ResultLine, useBillPdfs } from './CheckList';
 import { ArrowRightIcon, BoltIcon, CheckIcon, DownloadIcon, ShieldIcon, StopIcon, UploadIcon } from './Icons';
 import { ActiveTab, bridge } from './page-bridge';
+import { ReadyBar, ReviewList } from './ReviewList';
 import { blobFromBase64, saveFile } from './save-file';
 import { NEXT_ACTION, OUTLINE_PROBES, PlanStep, auditLabel, buildPlan } from './tgnpdcl-plan';
+import { billKey, billWideChecks, reviewFor } from './tgnpdcl-review';
 
 interface StepState {
   running: boolean;
@@ -58,11 +64,35 @@ export function TgnpdclView({ tab, onError }: {
   const stopRequested = useRef(false);
   /** The PDFs just read — a check opens the bill at its page. */
   const pdfs = useBillPdfs();
+  /** Review cards ticked as done, for this bill. */
+  const [reviewed, setReviewed] = useState<Set<string>>(new Set());
 
   // A bill loaded earlier in this browser session is still there after the panel was closed.
   useEffect(() => {
     billSession.load().then(setClaim).catch(() => undefined);
   }, []);
+
+  // The ticks of this bill (kept with it for the browser session); another bill starts with none.
+  useEffect(() => {
+    if (!claim) {
+      setReviewed(new Set());
+      return;
+    }
+    tgnpdclReviewed.load()
+      .then((saved) => setReviewed(new Set(saved && saved.bill === billKey(claim) ? saved.keys : [])))
+      .catch(() => setReviewed(new Set()));
+  }, [claim]);
+
+  function toggleReviewed(key: string) {
+    if (!claim) return;
+    setReviewed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      void tgnpdclReviewed.save({ bill: billKey(claim), keys: [...next] }).catch(() => undefined);
+      return next;
+    });
+  }
 
   // Whose bill is open on the site — asked again whenever the page changes.
   const pageKey = `${tab.tabId} ${tab.url?.href ?? ''}`;
@@ -118,6 +148,7 @@ export function TgnpdclView({ tab, onError }: {
   /** The bill is entered (or the wrong one was chosen): forget it. */
   async function clear() {
     await billSession.clear().catch(() => undefined);
+    await tgnpdclReviewed.clear().catch(() => undefined);
     pdfs.release();
     setClaim(null);
     setSteps({});
@@ -249,10 +280,34 @@ export function TgnpdclView({ tab, onError }: {
   }
 
   const rupees = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
-  const errors = claim?.checks.filter((c) => c.level === 'error') ?? [];
-  const warnings = claim?.checks.filter((c) => c.level !== 'error') ?? [];
+  // The checks about one tab or item are on that tab's review list; the list at the top keeps the rest.
+  const topChecks = claim ? billWideChecks(claim) : [];
+  const onTabs = (claim?.checks.length ?? 0) - topChecks.length;
+  const errors = topChecks.filter((c) => c.level === 'error');
+  // Information lines are not counted: the Checks list folds them away.
+  const warnings = topChecks.filter((c) => c.level === 'warning');
+  const notes = topChecks.filter((c) => c.level === 'info');
   const isReading = reading !== null;
   const checksOpen = showChecks ?? errors.length > 0;
+  /** Each tab's review list: the bill's items left for the person, and what its last fill left to do. */
+  const reviews = claim ? plan.map((step) => reviewFor(step, claim, steps[step.key]?.results ?? null)) : [];
+  const fillable = plan.filter((s) => !s.nothingToFill);
+
+  // On the site: the rows and fields still to enter or check stay outlined, with a short tag,
+  // until their card is ticked or the bill is cleared (drawn over the page only — see content/marks.ts).
+  const shorten = (s: string) => (s.length > 28 ? `${s.slice(0, 27)}…` : s);
+  const marks: PageMark[] = reviews.flat()
+    .filter((i) => i.spot && !reviewed.has(i.key))
+    .map((i) => ({ key: i.key, level: i.level, tag: `${i.level === 'enter' ? 'Enter' : 'Check'} · ${shorten(i.short ?? i.title)}`, detail: i.todo, spot: i.spot! }));
+  const marksKey = JSON.stringify(marks.map((m) => [m.key, m.level]));
+  /** Whether outlines were drawn on the page — so they are taken away again once none are left. */
+  const marked = useRef(false);
+  useEffect(() => {
+    // Not while a tab is being filled: the outlines are drawn once its fill has ended.
+    if (busy || (!marks.length && !marked.current)) return;
+    marked.current = marks.length > 0;
+    bridge.mark(tab.tabId, marks).catch(() => undefined);
+  }, [marksKey, pageKey, busy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** How a step stands, for its colours: idle → running → done / problem. */
   const standing = (key: string): 'idle' | 'running' | 'done' | 'problem' => {
@@ -313,7 +368,7 @@ export function TgnpdclView({ tab, onError }: {
               <button className="btn btn-secondary btn-sm" disabled={isReading || Boolean(busy)} onClick={() => input.current?.click()}>
                 <UploadIcon size={13} /> {reading !== null ? `Reading… ${clock(reading)}` : 'Other PDFs'}
               </button>
-              {(errors.length > 0 || warnings.length > 0) && (
+              {(errors.length > 0 || warnings.length > 0 || notes.length > 0) && (
                 <button className="btn btn-secondary btn-sm" onClick={() => setShowChecks(!checksOpen)}>
                   {checksOpen ? '▾' : '▸'} Checks
                   {errors.length > 0 && <span className="tag tag-danger">{errors.length}</span>}
@@ -321,7 +376,7 @@ export function TgnpdclView({ tab, onError }: {
                 </button>
               )}
             </div>
-            {checksOpen && <BillChecks checks={claim.checks} pdfs={pdfs} />}
+            {checksOpen && <BillChecks checks={topChecks} pdfs={pdfs} elsewhere={onTabs} />}
           </div>
         )}
 
@@ -344,13 +399,18 @@ export function TgnpdclView({ tab, onError }: {
               const failed = state?.results?.filter((r) => !r.ok).length ?? 0;
               const toCheck = state?.results?.filter((r) => r.ok && r.warn).length ?? 0;
               const doneCount = state?.results?.length ?? 0;
+              const review = reviews[n];
+              const toEnter = review.filter((i) => i.level === 'enter' && !reviewed.has(i.key)).length;
+              const toLook = review.filter((i) => i.level === 'check' && !reviewed.has(i.key)).length;
               return (
                 <div key={step.key} className={`step ${standing(step.key)}`}>
                   <div className="step-head">
                     <span className="step-num">{standing(step.key) === 'done' ? <CheckIcon size={14} /> : n + 1}</span>
                     <div className="step-title truncate">{step.title.split('. ')[1]}</div>
                     {state?.results && !state.running && (
-                      <span className={`tag tag-${failed ? 'warn' : 'success'}`}>{failed ? `${failed} to fix` : toCheck ? `${toCheck} to check` : 'filled'}</span>
+                      <span className={`tag tag-${toEnter ? 'danger' : toLook ? 'warn' : 'success'}`}>
+                        {toEnter ? `${toEnter} to enter` : toLook ? `${toLook} to check` : 'filled'}
+                      </span>
                     )}
                     {state?.running && <span className="tag tag-info">{doneCount}/{step.actions.length}</span>}
                   </div>
@@ -363,11 +423,12 @@ export function TgnpdclView({ tab, onError }: {
                       {step.preview.map((p, i) => <div key={`${i}|${p}`} className="small">{p}</div>)}
                     </details>
                   )}
-                  {step.manual.map((m) => <div key={m} className="warn-line">✎ {m}</div>)}
                   {step.nothingToFill && <div className="warn-line muted">Nothing to fill on this tab from these bills.</div>}
+                  <ReviewList items={review} done={reviewed} onToggle={toggleReviewed} tabId={tab.tabId} pdfs={pdfs} />
+                  {step.manual.map((m) => <div key={m} className="small muted">✎ {m}</div>)}
                   {state?.results && (
-                    <details className="preview results" open={failed > 0 || toCheck > 0}>
-                      <summary>Result: {state.results.length - failed} done{toCheck ? ` (${toCheck} to check)` : ''}{failed ? `, ${failed} failed` : ''}</summary>
+                    <details className="preview results">
+                      <summary>Full log: {state.results.length - failed} done{toCheck ? ` (${toCheck} to check)` : ''}{failed ? `, ${failed} failed` : ''}</summary>
                       {state.results.map((r) => <ResultLine key={r.index + r.label} result={r} tabId={tab.tabId} />)}
                     </details>
                   )}
@@ -399,7 +460,11 @@ export function TgnpdclView({ tab, onError }: {
           </div>
 
           <section className="section">
-            <button className="btn btn-secondary btn-block" disabled={Boolean(busy) || isReading} onClick={clear}>
+            <ReadyBar
+              items={reviews.flat()} done={reviewed}
+              filled={fillable.filter((s) => steps[s.key]?.results?.length).length} total={fillable.length}
+            />
+            <button className="btn btn-secondary btn-block mt" disabled={Boolean(busy) || isReading} onClick={clear}>
               <CheckIcon size={14} /> Finished — clear this bill
             </button>
             <div className="muted small center-text mt-sm">

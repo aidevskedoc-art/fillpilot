@@ -69,11 +69,26 @@ export interface TgnpdclPharmacyRow {
   page: number | null;
 }
 
+/** A TGNPDCL row's line on the final bill: its section, group, description as printed, and page. */
+export interface TgnpdclSource {
+  section: string;
+  group: string | null;
+  description: string;
+  page: number | null;
+}
+
 export interface ClaimCheck {
   level: 'error' | 'warning' | 'info';
   message: string;
   /** Where on the bill — the panel opens that PDF there when the check is clicked. */
   at?: BillPlace;
+  /**
+   * TGNPDCL: the tab the check is about. The panel says it in that tab's "To review" list rather
+   * than in the bill's list at the top — on the card of `item` when it is set.
+   */
+  tab?: 'room' | 'investigations' | 'pharmacy' | 'summary';
+  /** The tab's item: an index into room.wards / room.doctors / investigations.items / ownItems, or the tab's implants / pharmacy entry. */
+  item?: { list: 'wards' | 'doctors' | 'items' | 'ownItems'; index: number } | { list: 'implants' | 'pharmacy' };
 }
 
 /**
@@ -101,10 +116,12 @@ export interface TgnpdclClaim {
         code: string | null; tariff: string | null; description: string; qty: number; amountClaimed: number; lines: number; review: boolean; manual: boolean; notes: string[];
         /** Other readings of the code's last character, where OCR cannot tell I from 1 (78I / 781) — the site's tariff list decides. */
         alternatives?: string[];
+        /** Where on the final bill its (first) line is. */
+        source?: TgnpdclSource;
       }[];
       implants: { amount: number; note: string } | null;
       /** The hospital's own codes (YSSH): in no tariff list — entered on the site as non-tariff items. Identical lines are one row. */
-      ownItems?: { code: string; description: string; qty: number; rate: number | null; amountClaimed: number; lines: number; notes: string[] }[];
+      ownItems?: { code: string; description: string; qty: number; rate: number | null; amountClaimed: number; lines: number; notes: string[]; source?: TgnpdclSource }[];
     };
     /**
      * total: the final bill's PHARMACY amount. rows: from the pharmacy bill (PDF or the HIS Excel), when one
@@ -216,6 +233,39 @@ export interface BhelClaim {
   /** Sections left for the person — none since 2026-11-11 (the rest go under Other Unlisted Item); kept for bills read before. */
   manual: { section: string; amount: number; reason: string }[];
   totals: { billTotal: number; netAmount: number | null; rows: number; manual: number };
+  checks: ClaimCheck[];
+}
+
+/** One charge box of NTPC's Patient Discharge screen (backend/src/claims/ntpc.js) and the summary bill's lines in it. */
+export interface NtpcCharge {
+  key: 'room' | 'procedure' | 'consultation' | 'drug' | 'consumables' | 'ot' | 'surgery' | 'implants' | 'anesthesia' | 'tests' | 'others';
+  /** The box's caption on the site ("Charges Room"). */
+  box: string;
+  /** As on the summary bill: after NTPC's discount, in rupees and paise. */
+  amount: number;
+  /** The summary bill's lines added up in it ("INTENSIVE CARE UNIT", "HAEMATOLOGY"). */
+  lines: string[];
+}
+
+/**
+ * POST /api/claims/ntpc (the summary bill PDF, multipart) — NTPC Sanjeevani's Patient Discharge
+ * screen: the dates, the bill number and one amount per charge box the bill has lines for. Discharge by
+ * is the portal's own user id, read on the page. Kept by neither the server nor the panel beyond
+ * the browser session.
+ */
+export interface NtpcClaim {
+  documents: { fileName: string; docType: string | null; pageCount: number | null; error?: string }[];
+  patient: { name?: string; ipNo?: string; company?: string; consultant?: string };
+  ipNo: string | null;
+  /** The summary bill's invoice number (ICO…). */
+  billNo: string | null;
+  /** dd-mm-yyyy hh:mm, as the site's date boxes show it: D.O.A and D.O.D; the bill date is D.O.D's date (dd-mm-yyyy). */
+  admissionDateTime: string | null;
+  dischargeDateTime: string | null;
+  billDate: string | null;
+  charges: NtpcCharge[];
+  /** billTotal: the summary's TOTAL AMOUNT; gst and withGst when the bill has GST; boxes: the charges added up. */
+  totals: { billTotal: number | null; gst: number | null; withGst: number | null; boxes: number };
   checks: ClaimCheck[];
 }
 
@@ -358,7 +408,7 @@ export interface ExtractedTable {
 }
 
 /** The sites whose bills FillPilot reads (BILLS_READ in the activity log). */
-export type BillSite = 'tgnpdcl' | 'pmjay' | 'cil' | 'bhel' | 'spdcl' | 'tgnpdcl-pharmacy' | 'tgtransco';
+export type BillSite = 'tgnpdcl' | 'pmjay' | 'cil' | 'bhel' | 'ntpc' | 'spdcl' | 'tgnpdcl-pharmacy' | 'tgtransco';
 
 /** GET /api/dashboard/stats — the caller's own work; one final + summary bill read = 1 bill. */
 export interface DashboardStats {

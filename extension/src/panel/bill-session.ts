@@ -5,7 +5,7 @@
 // emptied when the browser closes or the extension reloads. Keeping it there
 // rather than in the panel's own memory lets the panel be closed and reopened
 // in the middle of a bill.
-import type { BhelClaim, CilClaim, PmjayClaim, TgnpdclClaim } from '../../../web/projects/shared/src/api-types';
+import type { BhelClaim, CilClaim, NtpcClaim, PmjayClaim, TgnpdclClaim } from '../../../web/projects/shared/src/api-types';
 
 function session<T>(key: string) {
   return {
@@ -24,6 +24,8 @@ function session<T>(key: string) {
 
 /** TGNPDCL bill entry. */
 export const billSession = session<TgnpdclClaim>('pfa.bill');
+/** The TGNPDCL review cards the person ticked as done; `bill` ties them to the bill (tgnpdcl-review.ts billKey). */
+export const tgnpdclReviewed = session<{ bill: string; keys: string[] }>('pfa.tgnpdcl.reviewed');
 /** PM-JAY Treatment Plan — its own slot, so a bill loaded for one site never fills the other. */
 export const pmjaySession = session<PmjayClaim>('pfa.pmjay');
 /**
@@ -36,3 +38,5 @@ export const pmjayAdded = session<{ bill: string; codes: string[] }>('pfa.pmjay.
 export const cilSession = session<CilClaim>('pfa.cil');
 /** BHEL Upload Bill (KareXpert). */
 export const bhelSession = session<BhelClaim>('pfa.bhel');
+/** NTPC Patient Discharge (Sanjeevani). */
+export const ntpcSession = session<NtpcClaim>('pfa.ntpc');

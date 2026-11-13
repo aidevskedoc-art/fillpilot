@@ -8,12 +8,12 @@
 //           (local-account.ts), the approved sites (config.json) and the
 //           activity log (activity-log.ts) live in the extension itself.
 import type {
-  AllowedSite, BhelClaim, CilClaim, DocumentDto, FormatResponse, LoginResponse, MatchResponse, PmjayClaim, SpdclSheet, SpdclTariff, TgnpdclClaim, TgnpdclPharmacySheet,
+  AllowedSite, BhelClaim, CilClaim, DocumentDto, FormatResponse, LoginResponse, MatchResponse, NtpcClaim, PmjayClaim, SpdclSheet, SpdclTariff, TgnpdclClaim, TgnpdclPharmacySheet,
   TgTranscoSheet, TgTranscoTariff, UploadResponse, User,
 } from '../../../web/projects/shared/src/api-types';
 import type { FieldDescriptor, PageInfo } from '../../../web/projects/shared/src/page-contract';
 import { activityLog } from './activity-log';
-import { bhelSession, billSession, cilSession, pmjayAdded, pmjaySession } from './bill-session';
+import { bhelSession, billSession, cilSession, ntpcSession, pmjayAdded, pmjaySession } from './bill-session';
 import { FirstLogin, localAccount } from './local-account';
 
 const SESSION_KEY = 'pfa.session';
@@ -196,6 +196,7 @@ class PanelApi {
     await pmjayAdded.clear();
     await cilSession.clear();
     await bhelSession.clear();
+    await ntpcSession.clear();
   }
 
   completedDocuments = async () =>
@@ -261,6 +262,13 @@ class PanelApi {
     const form = new FormData();
     files.forEach((f) => form.append('files', f, f.name));
     return this.call<BhelClaim>('POST', '/api/claims/bhel', form);
+  }
+
+  /** The summary bill, read for NTPC's Patient Discharge screen (Sanjeevani): one amount per charge box. Nothing is kept on the server. */
+  readNtpcBills(files: File[]): Promise<NtpcClaim> {
+    const form = new FormData();
+    files.forEach((f) => form.append('files', f, f.name));
+    return this.call<NtpcClaim>('POST', '/api/claims/ntpc', form);
   }
 
   /**

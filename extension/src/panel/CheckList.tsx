@@ -61,30 +61,51 @@ export function useBillPdfs(): BillPdfs {
 const ICON = { error: '✗', warning: '⚠', info: 'ℹ' } as const;
 const TONE = { error: ' bad', warning: '', info: ' muted' } as const;
 
-/** The checks from reading the bills, errors first. Those with a place on the bill open it there. */
-export function BillChecks({ checks, pdfs }: { checks: ClaimCheck[]; pdfs: BillPdfs }) {
+/**
+ * The checks from reading the bills: errors, then warnings; lines that are only
+ * information are folded away (the client, 2026-11-13: too many coloured lines
+ * confused the staff). Those with a place on the bill open it there.
+ * elsewhere: how many more are said under the tab they are about (TGNPDCL's review lists).
+ */
+export function BillChecks({ checks, pdfs, elsewhere = 0 }: { checks: ClaimCheck[]; pdfs: BillPdfs; elsewhere?: number }) {
   /** The check whose PDF the panel no longer has — it says so under that line. */
   const [notHeld, setNotHeld] = useState<string | null>(null);
-  const ordered = [...checks.filter((c) => c.level === 'error'), ...checks.filter((c) => c.level !== 'error')];
+  const main = [...checks.filter((c) => c.level === 'error'), ...checks.filter((c) => c.level === 'warning')];
+  const info = checks.filter((c) => c.level === 'info');
+  const line = (c: ClaimCheck) => {
+    const text = `${ICON[c.level]} ${c.message}`;
+    const className = `warn-line${TONE[c.level]}`;
+    const at = c.at;
+    if (!at) return <div key={c.message} className={className}>{text}</div>;
+    const where = `the ${at.doc} bill${at.page ? ` at page ${at.page}` : ''}`;
+    return (
+      <div key={c.message}>
+        <button type="button" className={`${className} goto`} title={`Open ${where}`} onClick={() => setNotHeld(pdfs.open(at) ? null : c.message)}>
+          {text}<span className="goto-tag">{at.page ? `p. ${at.page}` : `${at.doc} bill`} ↗</span>
+        </button>
+        {notHeld === c.message && (
+          <div className="warn-line muted">The PDF is no longer open in this panel — choose the bill PDFs again with "Other PDFs" to open it from here.</div>
+        )}
+      </div>
+    );
+  };
   return (
     <div className="mt-sm">
-      {ordered.map((c) => {
-        const text = `${ICON[c.level]} ${c.message}`;
-        const className = `warn-line${TONE[c.level]}`;
-        const at = c.at;
-        if (!at) return <div key={c.message} className={className}>{text}</div>;
-        const where = `the ${at.doc} bill${at.page ? ` at page ${at.page}` : ''}`;
-        return (
-          <div key={c.message}>
-            <button type="button" className={`${className} goto`} title={`Open ${where}`} onClick={() => setNotHeld(pdfs.open(at) ? null : c.message)}>
-              {text}<span className="goto-tag">{at.page ? `p. ${at.page}` : `${at.doc} bill`} ↗</span>
-            </button>
-            {notHeld === c.message && (
-              <div className="warn-line muted">The PDF is no longer open in this panel — choose the bill PDFs again with "Other PDFs" to open it from here.</div>
-            )}
-          </div>
-        );
-      })}
+      <div className="review-legend">
+        From reading the bills · <span className="bad">✗ red</span> = check the bill before filling · <span className="warn-text">⚠ amber</span> = worth a look · a line with ↗ opens the bill at that page
+      </div>
+      {main.map(line)}
+      {elsewhere > 0 && (
+        <div className="warn-line muted">
+          {elsewhere} more {elsewhere === 1 ? 'is' : 'are'} about one item or tab — {elsewhere === 1 ? 'it is' : 'they are'} on that tab's "To review" list below, on the item's card.
+        </div>
+      )}
+      {info.length > 0 && (
+        <details className="preview mt-sm">
+          <summary>{info.length} note(s) for information</summary>
+          {info.map(line)}
+        </details>
+      )}
     </div>
   );
 }

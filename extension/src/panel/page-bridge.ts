@@ -2,7 +2,7 @@
 // can collide ("f1" in two iframes), so they are made unique here as
 // "<frameId>:<ref>" and split again when addressing a frame.
 import type {
-  ActionResult, FieldDescriptor, FillAssignment, FillOutcome, PageAction, PageAgent, PageIdentity, PageOutline, PageSpot,
+  ActionResult, FieldDescriptor, FillAssignment, FillOutcome, PageAction, PageAgent, PageIdentity, PageMark, PageOutline, PageSpot,
 } from '../../../web/projects/shared/src/page-contract';
 
 export interface ActiveTab {
@@ -108,6 +108,17 @@ export const bridge = {
       args: [spot],
     });
     return result?.result === true;
+  },
+
+  /** Outlines these rows and fields on the page until replaced (an empty list takes them all away). → how many are on the page now. */
+  async mark(tabId: number, marks: PageMark[]): Promise<number> {
+    await ensureAgent(tabId);
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      func: (list: PageMark[]) => globalThis.__pdfFormAssistant?.mark(list) ?? 0,
+      args: [marks],
+    });
+    return typeof result?.result === 'number' ? result.result : 0;
   },
 
   async readIdentity(tabId: number): Promise<PageIdentity> {

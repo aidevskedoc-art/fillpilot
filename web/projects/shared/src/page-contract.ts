@@ -50,6 +50,7 @@ export type PageAction =
     type: 'setField'; field: string; value: string; label: string;
     /** The control's id on the site, tried before the label. */ id?: string;
     /** A date box locked for typing because a calendar fills it: the value is written as the calendar would. */ calendar?: boolean;
+    /** Typed key by key and left, for a page that adds amounts up as they are typed (NTPC's Total Amount). */ keys?: boolean;
   }
   | { type: 'ensureRows'; headers: string[]; count: number; addButton?: string; label: string }
   | { type: 'setCell'; headers: string[]; row: number; column: string; value: string; optionMatch?: string; label: string }
@@ -128,6 +129,8 @@ export interface PageIdentity {
   /** "Admission No" — the IP number under another name (Coal India's e-Arogya Suvidha). */
   admissionNumber?: string | null;
   patientName: string | null;
+  /** The hospital's user id the site shows: "Logged in as … (HITECH CITY)(0610), …" → "0610" (NTPC Sanjeevani's Discharge by). */
+  loginId?: string | null;
 }
 
 /** The page's structure without any field values — for diagnosing a site profile. */
@@ -153,6 +156,22 @@ export interface PageOutline {
   shadowHosts: number;
 }
 
+/**
+ * A row or field the person still has to deal with, outlined on the page until
+ * its review card is ticked: red "enter" (FillPilot could not finish it), amber
+ * "check" (on the site, but it may differ from the bill). Drawn over the page
+ * only — nothing of the site is changed, typed or clicked.
+ */
+export interface PageMark {
+  key: string;
+  level: 'enter' | 'check';
+  /** The short tag shown on the outline. */
+  tag: string;
+  /** What to do, in a sentence — shown when the pointer rests on the tag. */
+  detail?: string;
+  spot: PageSpot;
+}
+
 /** What content.js installs on its isolated-world global (never visible to page scripts). */
 export interface PageAgent {
   scan(): FieldDescriptor[];
@@ -162,6 +181,8 @@ export interface PageAgent {
   runActions(actions: PageAction[]): Promise<ActionResult[]>;
   /** Scrolls to a step's row or field and outlines it. → false when it is not on the page now. */
   show(spot: PageSpot): boolean;
+  /** Replaces the page's outlines with these (none clears them). → how many are on the page now. */
+  mark(marks: PageMark[]): number;
   readIdentity(): PageIdentity;
   describePage(probes?: string[]): PageOutline;
 }

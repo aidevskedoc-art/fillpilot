@@ -20,6 +20,8 @@ import { CilView } from './CilView';
 import { isCilPage } from './cil-plan';
 import { BhelView } from './BhelView';
 import { isBhelPage } from './bhel-plan';
+import { NtpcView } from './NtpcView';
+import { isNtpcPage } from './ntpc-plan';
 import { SpdclView } from './SpdclView';
 import { TgnpdclPharmacyView } from './TgnpdclPharmacyView';
 import { TgTranscoView } from './TgTranscoView';
@@ -47,8 +49,8 @@ const TOOLS: { key: Tool; name: string; what: string; Icon: typeof SheetIcon }[]
   { key: 'tgtransco', name: 'TG Transco', what: 'Bill Excel in their own template', Icon: FileTextIcon },
 ];
 
-/** The bill sites (TGNPDCL, PM-JAY, Coal India, BHEL): FillPilot works there in bill entry only, never the any-PDF mode. */
-const isBillSite = (url: URL | null) => Boolean(url && /(^|\.)(tgnpdcl\.com|provider\.nha\.gov\.in|cilbpa\.utiitsl\.com|bhel\.karexpert\.com)$/i.test(url.hostname));
+/** The bill sites (TGNPDCL, PM-JAY, Coal India, BHEL, NTPC): FillPilot works there in bill entry only, never the any-PDF mode. */
+const isBillSite = (url: URL | null) => Boolean(url && /(^|\.)(tgnpdcl\.com|provider\.nha\.gov\.in|cilbpa\.utiitsl\.com|bhel\.karexpert\.com|ntpc\.co\.in)$/i.test(url.hostname));
 type RowFilter = 'all' | 'review' | 'matched' | 'unmatched';
 
 export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
@@ -410,6 +412,8 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
         <CilView tab={tab} onError={setError} />
       ) : siteState === 'ready' && tab && isBhelPage(tab.url) && api.mode !== 'reader' ? (
         <BhelView tab={tab} onError={setError} />
+      ) : siteState === 'ready' && tab && isNtpcPage(tab.url) && api.mode !== 'reader' ? (
+        <NtpcView tab={tab} onError={setError} />
       ) : api.mode === 'reader' ? (
         <section className="section">
           <div className="card card-pad">
@@ -426,8 +430,8 @@ export function Main({ user, onLogout }: { user: User; onLogout: () => void }) {
             <div className="strong">{siteState === 'ready' ? 'Open the patient\'s bill on this site' : 'Open the website and enable it'}</div>
             <div className="muted small mt-sm">
               {siteState === 'ready'
-                ? 'FillPilot switches to bill entry on the bill page: TGNPDCL medical bill entry, the PM-JAY case, the Coal India claim, or BHEL\'s Upload Bill screen.'
-                : 'Go to TGNPDCL, PM-JAY, Coal India or BHEL and press Enable above for that site. On the bill page FillPilot switches to bill entry.'}
+                ? 'FillPilot switches to bill entry on the bill page: TGNPDCL medical bill entry, the PM-JAY case, the Coal India claim, BHEL\'s Upload Bill screen, or NTPC\'s Patient Discharge screen.'
+                : 'Go to TGNPDCL, PM-JAY, Coal India, BHEL or NTPC and press Enable above for that site. On the bill page FillPilot switches to bill entry.'}
             </div>
           </div>
         </section>

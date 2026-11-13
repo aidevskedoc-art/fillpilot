@@ -12,6 +12,7 @@ const { writeTgnpdclPharmacyWorkbook } = require('../claims/tgnpdcl-pharmacy-wor
 const { buildPmjayClaim } = require('../claims/pmjay');
 const { buildCilClaim } = require('../claims/cil');
 const { buildBhelClaim } = require('../claims/bhel');
+const { buildNtpcClaim } = require('../claims/ntpc');
 const { readFirstSheet, XlsxError } = require('../claims/xlsx');
 const spdcl = require('../claims/spdcl');
 const { writeSpdclWorkbook } = require('../claims/spdcl-workbook');
@@ -48,9 +49,10 @@ function inTurn(task) {
  * after answering with what is wrong. `fills` names what the final bill is
  * needed for; `files` the PDFs among the uploads (all of them by default).
  */
-async function readBills(req, res, fills, files = req.files || []) {
+async function readBills(req, res, fills, files = req.files || [], need = 'final') {
+  // need: the bill the site is filled from — 'final' (and the summary bill with it), or 'summary' alone (NTPC).
   if (!files.length) {
-    res.status(400).json({ error: 'Choose the final bill PDF (and the summary bill PDF)' });
+    res.status(400).json({ error: need === 'summary' ? 'Choose the summary bill PDF' : 'Choose the final bill PDF (and the summary bill PDF)' });
     return null;
   }
 
@@ -83,7 +85,15 @@ async function readBills(req, res, fills, files = req.files || []) {
   const finals = read.filter((r) => r.docType === 'yashoda-final-bill');
   const summaries = read.filter((r) => r.docType === 'yashoda-summary-bill');
   const pharmacies = read.filter((r) => r.docType === 'yashoda-pharmacy-bill');
-  if (!finals.length) {
+  if (need === 'summary' && !summaries.length) {
+    const unread = read.filter((r) => r.error).map((r) => `${r.fileName}: ${r.error}`).join('; ');
+    res.status(422).json({
+      error: unread || `None of these PDFs is a Yashoda summary bill (the bill of supply with the ICO invoice number) — ${fills} filled from it.`,
+      documents,
+    });
+    return null;
+  }
+  if (need === 'final' && !finals.length) {
     const unread = read.filter((r) => r.error).map((r) => `${r.fileName}: ${r.error}`).join('; ');
     res.status(422).json({
       error: unread || `None of these PDFs is a Yashoda final bill (the itemised bill with "Charged Amount") — ${fills} filled from it.`,
@@ -96,7 +106,7 @@ async function readBills(req, res, fills, files = req.files || []) {
     return null;
   }
   // Only TGNPDCL uses the pharmacy bill: the other sites leave it alone, as they did before it was read.
-  return { documents, read, final: finals[0].structured, summary: summaries[0]?.structured, pharmacies: pharmacies.map((p) => p.structured) };
+  return { documents, read, final: finals[0]?.structured, summary: summaries[0]?.structured, pharmacies: pharmacies.map((p) => p.structured) };
 }
 
 /** The log records that bills were read — not whose, and not their file names. */
@@ -238,6 +248,16 @@ router.post('/bhel', upload.array('files', MAX_FILES), route(async (req, res) =>
   if (!bills) return;
   const claim = buildBhelClaim({ final: bills.final, summary: bills.summary });
   await logRead(req, bills.read, 'bhel');
+  res.json({ documents: bills.documents, ...claim });
+}));
+
+// POST /api/claims/ntpc — the summary bill (a final bill with it is only checked to be the same
+// patient's) → NTPC Sanjeevani's Patient Discharge screen: dates, bill number, one amount per charge box.
+router.post('/ntpc', upload.array('files', MAX_FILES), route(async (req, res) => {
+  const bills = await readBills(req, res, 'the Patient Discharge screen is', undefined, 'summary');
+  if (!bills) return;
+  const claim = buildNtpcClaim({ summary: bills.summary, final: bills.final });
+  await logRead(req, bills.read, 'ntpc');
   res.json({ documents: bills.documents, ...claim });
 }));
 

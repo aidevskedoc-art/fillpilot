@@ -5,7 +5,7 @@ import { SkeletonModule } from 'primeng/skeleton';
 import type { BillSite, DashboardStats } from '@shared/api-types';
 import { ApiService, errorMessage } from '../core/api.service';
 
-const SITE_NAMES: Record<BillSite, string> = { tgnpdcl: 'TGNPDCL', pmjay: 'PM-JAY', cil: 'Coal India', bhel: 'BHEL', spdcl: 'SPDCL Excel', 'tgnpdcl-pharmacy': 'TGNPDCL pharmacy Excel', tgtransco: 'TG Transco Excel' };
+const SITE_NAMES: Record<BillSite, string> = { tgnpdcl: 'TGNPDCL', pmjay: 'PM-JAY', cil: 'Coal India', bhel: 'BHEL', ntpc: 'NTPC', spdcl: 'SPDCL Excel', 'tgnpdcl-pharmacy': 'TGNPDCL pharmacy Excel', tgtransco: 'TG Transco Excel' };
 
 @Component({
   selector: 'app-dashboard',

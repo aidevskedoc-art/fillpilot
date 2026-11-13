@@ -197,9 +197,16 @@ function buildTgnpdclPharmacy(pharmacyBill) {
 function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
   const checks = [];
   // at: { doc: 'final' | 'summary' | 'pharmacy', page } — where on the bill; the panel opens the PDF there.
-  const add = (level, message, at) => checks.push({ level, message, ...(at ? { at } : {}) });
+  // on: { tab, item? } — the tab (and its item) the check is about: the panel says it in that tab's
+  // "To review" list, on the item's card, instead of in the bill's list at the top.
+  const add = (level, message, at, on) => checks.push({ level, message, ...(at ? { at } : {}), ...(on || {}) });
+  // A line's own reading problems (also on the line, item.issues), said with the tab and item it goes to.
+  const sayItem = (item, g, on) => {
+    for (const message of item.issues || []) add('warning', `Final bill: ${item.description || g.name}: ${message}`, { doc: 'final', page: item.page ?? null }, on);
+  };
 
-  for (const issue of final.issues || []) add(issue.level, `Final bill: ${issue.message}`, { doc: 'final', page: issue.page ?? null });
+  // The lines' own problems are said with the item they go to (sayItem), not here.
+  for (const issue of final.issues || []) if (!issue.item) add(issue.level, `Final bill: ${issue.message}`, { doc: 'final', page: issue.page ?? null });
   addSummaryIssues(add, final, summary);
   // The pharmacy bill's own checks come with its rows (buildTgnpdclPharmacy).
 
@@ -268,12 +275,15 @@ function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
     row.amountClaimed = round2(row.amountClaimed + (item.amount || 0));
     for (const n of item.issues || []) if (!row.notes.includes(n)) row.notes.push(n);
     if (rate == null && !row.notes.includes('Rate not readable — enter it yourself')) row.notes.push('Rate not readable — enter it yourself');
+    return row;
   };
   // bill: the pharmacy bill's totals when one was read; the rows come from it (pharmacyRows).
   const pharmacy = { total: null, rows: [], note: null, bill: null };
   // Every section DOCTOR matches — the same test that keeps them out of
   // Investigations, so a "CONSULTATION CHARGES" section can't fall between the two.
   const doctorItems = [];
+  /** Investigations lines with reading problems, said once their row's place in the list is known (after the merge). */
+  const unsaid = [];
 
   for (const section of final.sections) {
     for (const g of section.groups) {
@@ -281,10 +291,12 @@ function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
       for (const item of g.items) {
         const source = { section: section.name, group: g.name, description: item.description, page: item.page };
         if (DOCTOR.test(section.name)) {
+          sayItem(item, g, { tab: 'room', item: { list: 'doctors', index: doctorItems.length } });
           doctorItems.push(item);
           continue;
         }
         if (ICU.test(label)) {
+          sayItem(item, g, { tab: 'room' });
           room.icuDays += item.qty || 0;
           continue;
         }
@@ -292,22 +304,27 @@ function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
           const days = item.qty || 1;
           const at = { doc: 'final', page: item.page ?? null };
           if (item.rate == null && item.amount == null) {
-            add('warning', `Room rent "${item.description}": neither the rate nor the amount could be read — enter this ward row yourself`, at);
+            sayItem(item, g, { tab: 'room' });
+            add('warning', `Room rent "${item.description}": neither the rate nor the amount could be read — enter this ward row yourself`, at, { tab: 'room' });
             continue;
           }
+          const ward = { tab: 'room', item: { list: 'wards', index: room.wards.length } };
+          sayItem(item, g, ward);
           // No rate printed (or unreadable): the amount covers all the days, so the rate is amount ÷ days.
           const ratePerDay = item.rate ?? round2(item.amount / days);
           if (item.rate == null && days > 1) {
-            add('warning', `Room rent "${item.description}": rate per day not readable — worked out as ${item.amount} ÷ ${days} day(s) = ${ratePerDay}; check it`, at);
+            add('warning', `Room rent "${item.description}": rate per day not readable — worked out as ${item.amount} ÷ ${days} day(s) = ${ratePerDay}; check it`, at, ward);
           }
           room.wards.push({ ratePerDay, days, amount: item.amount, source });
           continue;
         }
         if (PHARMACY.test(label)) {
+          sayItem(item, g, { tab: 'pharmacy' });
           pharmacy.total = round2((pharmacy.total || 0) + (item.amount || 0));
           continue;
         }
         if (IMPLANT.test(label)) {
+          sayItem(item, g, { tab: 'investigations', item: { list: 'implants' } });
           investigations.implants = {
             amount: round2((investigations.implants?.amount || 0) + (item.amount || 0)),
             note: 'Implants are entered on the site by department and implant item, with the implant invoice — the bill only shows a total.',
@@ -315,7 +332,8 @@ function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
           continue;
         }
         if (item.ownCode) {
-          addOwn(item, source);
+          const own = addOwn(item, source);
+          sayItem(item, g, { tab: 'investigations', item: { list: 'ownItems', index: investigations.ownItems.indexOf(own) } });
           continue;
         }
         // No code printed, but the client gave one for this item (oxygen → 2225/COMM).
@@ -357,11 +375,16 @@ function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
         }
         if (row.manual || item.issues?.length || item.corrected) row.review = true;
         investigations.items.push(row);
+        if (item.issues?.length) unsaid.push({ item, g, row });
       }
     }
   }
   joinRepeatedLines(investigations.items);
-  investigations.items = mergeByCode(investigations.items);
+  const mergedInto = new Map();
+  investigations.items = mergeByCode(investigations.items, mergedInto);
+  for (const { item, g, row } of unsaid) {
+    sayItem(item, g, { tab: 'investigations', item: { list: 'items', index: investigations.items.indexOf(mergedInto.get(row) ?? row) } });
+  }
   // A reading that is another line's code on this bill is not an alternative: both items are on the bill.
   const billCodes = new Set(investigations.items.map((r) => r.code).filter(Boolean));
   for (const r of investigations.items) {
@@ -390,18 +413,19 @@ function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
   // The site's "Room Days (total)": days charged as room rent, ICU counted separately.
   room.roomDays = room.wards.reduce((s, w) => s + w.days, 0);
 
-  if (!room.wards.length) add('warning', 'No room rent on the bill — ward rows left empty');
+  if (!room.wards.length) add('warning', 'No room rent on the bill — ward rows left empty', undefined, { tab: 'room' });
   const stayDays = daysBetween(summary?.patient?.admission?.date, summary?.patient?.discharge?.date);
   const bedDays = room.roomDays + room.icuDays;
   if (stayDays != null && (room.wards.length || room.icuDays) && bedDays !== stayDays) {
-    add('warning', `Room + ICU charged for ${bedDays} day(s) but the stay was ${stayDays} day(s) (admission to discharge) — check the ward rows`);
+    add('warning', `Room + ICU charged for ${bedDays} day(s) but the stay was ${stayDays} day(s) (admission to discharge) — check the ward rows`, undefined, { tab: 'room' });
   }
 
   if (pharmacyBill) {
     const tab = buildTgnpdclPharmacy(pharmacyBill);
     pharmacy.rows = tab.rows;
     pharmacy.bill = tab.bill;
-    checks.push(...tab.checks);
+    // The pharmacy bill's own checks are about the Pharmacy tab's rows: said there.
+    checks.push(...tab.checks.map((c) => ({ ...c, tab: 'pharmacy' })));
     // The final bill's PHARMACY line and the pharmacy bill are two readings of the same amount.
     const due = pharmacyDue(pharmacyBill.totals);
     if (pharmacy.total != null && due.amount != null && !matchesDue(pharmacy.total, due)) {
@@ -410,9 +434,11 @@ function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
     if (!tab.rows.length) pharmacy.note = 'The pharmacy bill has no item to enter.';
   } else if (pharmacy.total != null) {
     pharmacy.note = `The final bill shows pharmacy only as a total (${pharmacy.total}). Choose the pharmacy bill (PDF or the HIS Excel) with the other bills to fill this tab.`;
-    add('warning', pharmacy.note);
+    add('warning', pharmacy.note, undefined, { tab: 'pharmacy', item: { list: 'pharmacy' } });
   }
-  if (investigations.implants) add('warning', `Implants ${investigations.implants.amount}: ${investigations.implants.note}`);
+  if (investigations.implants) {
+    add('warning', `Implants ${investigations.implants.amount}: ${investigations.implants.note}`, undefined, { tab: 'investigations', item: { list: 'implants' } });
+  }
 
   const summaryTab = {
     employeePaid: summary?.totals?.paid ?? null,
@@ -493,12 +519,14 @@ function joinRepeatedLines(rows) {
  * done (HAEMOGRAM × 18), the site wants code + qty + total claimed. Rows
  * without any code stay separate; manual rows merge only with manual rows.
  */
-function mergeByCode(rows) {
+function mergeByCode(rows, into = new Map()) {
+  // into: each row → the row it became (itself, a copy, or the row it was added to).
   const out = [];
   const byKey = new Map();
   for (const r of rows) {
     if (!r.code) {
       out.push(r);
+      into.set(r, r);
       continue;
     }
     const key = `${r.code}|${r.tariff || ''}|${r.manual ? 'manual' : ''}`;
@@ -507,8 +535,10 @@ function mergeByCode(rows) {
       const copy = { ...r, notes: [...r.notes], descriptions: [r.description] };
       byKey.set(key, copy);
       out.push(copy);
+      into.set(r, copy);
       continue;
     }
+    into.set(r, prev);
     prev.qty += r.qty;
     prev.amountClaimed = round2(prev.amountClaimed + (r.amountClaimed || 0));
     prev.lines += 1;

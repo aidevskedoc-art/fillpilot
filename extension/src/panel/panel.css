@@ -471,6 +471,56 @@ input[type=checkbox] { accent-color: var(--blue); width: 15px; height: 15px; }
   .fig, .card, .guide-steps li { break-inside: avoid; }
 }
 
+/* The review list (TGNPDCL): what the person must enter (red) or check (amber) after a fill. */
+.btn-xs { padding: 3px 8px; font-size: 11px; border-radius: 7px; }
+.review-list { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.review-legend { font-size: 11px; color: var(--muted); }
+.review {
+  border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: 10px; padding: 8px 10px;
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+}
+.review.enter { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 6%, transparent); }
+.review.done { border-left-color: var(--ok); background: none; padding: 5px 10px; opacity: 0.75; }
+.review-head { display: flex; align-items: center; gap: 8px; }
+.review-kind {
+  flex: none; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 1px 7px; border-radius: 999px;
+  color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+.review.enter .review-kind, .review-modal.enter .review-kind { color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent); }
+.review.done .review-kind { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.review-title { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; word-break: break-word; }
+.review.done .review-title { font-weight: 500; }
+.review-tick {
+  flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; cursor: pointer;
+  color: var(--muted); background: none; border: 1px solid var(--border-strong);
+}
+.review-tick:hover { color: var(--ok); border-color: var(--ok); }
+.review-tick[aria-pressed='true'] { color: #fff; background: var(--ok); border-color: var(--ok); }
+.review-tick:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.review-facts { margin-top: 3px; font-size: 11.5px; color: var(--muted); word-break: break-word; }
+.review-todo { margin-top: 4px; font-size: 12px; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+
+/* How much is left on the bill, under the tabs. */
+.ready { display: flex; align-items: center; gap: 6px; padding: 9px 11px; border-radius: 10px; font-size: 12.5px; border: 1px solid; }
+.ready.todo { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.ready.clear { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.ready.idle { color: var(--muted); border-color: var(--border); }
+
+/* The popup over the panel. */
+.modal-backdrop { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 12px; background: rgba(4, 5, 12, 0.62); }
+.modal {
+  width: 100%; max-width: 440px; max-height: calc(100vh - 24px); overflow-y: auto; padding: 14px;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.6);
+}
+.modal-head { display: flex; align-items: center; gap: 8px; }
+.modal-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 650; word-break: break-word; }
+.modal-section { margin-top: 12px; }
+.modal-label { margin-bottom: 4px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.how-line { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; padding: 5px 8px; font-size: 12.5px; border: 1px solid var(--border); border-radius: 8px; }
+.how-line + .how-line { margin-top: 4px; }
+.how-value { font-weight: 600; text-align: right; word-break: break-word; }
+
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation-duration: 2.4s; }
   .bar.sweep > span, .rail-seg.running, .dot-wait { animation: none; }
