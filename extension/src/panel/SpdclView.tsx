@@ -1,7 +1,7 @@
 // SPDCL mode: the SPDCL site takes a claim only as an Excel upload in its own
 // template. Choose the HIS final bill and pharmacy bill Excel files; the server
 // turns them into that file (backend/src/claims/spdcl.js): one row per service
-// or medicine per day. The person checks it here, saves it, and uploads it on
+// or medicine per day, one per doctor (Qty = the visits). The person checks it here, saves it, and uploads it on
 // the SPDCL site themselves.
 //
 // On the panel's "Excel & PDF" tab, whatever page is open: it does not touch the

@@ -11,6 +11,8 @@
 //   N Time(s)         spread over the billed stay days, the remainder on the first days
 //   an undated line   admission; the same item again in that section → the next day
 //   pharmacy          the date of its indent
+// SPDCL only: a doctor's visits then join into one row, Qty = the visits,
+// dated the first visit (the client, 2026-11-13).
 // Amount is Rate × Qty, as SPDCL's sheet works it out (a formula in the file).
 
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -488,14 +490,6 @@ function buildDailyRows({
     }
   }
 
-  const heads = [];
-  for (const r of rows) {
-    let h = heads.find((x) => x.head === r.head);
-    if (!h) heads.push((h = { head: r.head, rows: 0, amount: 0 }));
-    h.rows += 1;
-    h.amount = round2(h.amount + r.amount);
-  }
-
   return {
     patient: { name: final.patient.name ?? pharmacy?.patient.name ?? null, ipNo: final.patient.ipNo ?? pharmacy?.patient.ipNo ?? null },
     rows,
@@ -504,10 +498,22 @@ function buildDailyRows({
     earliest,
     latest,
     stayDays,
-    heads,
+    heads: headsOf(rows),
     pharmacyReturned,
     totals: { excel, hisBill, netAmount: final.netAmount ?? null, pharmacyBill: pharmacyNet, difference },
   };
+}
+
+/** Rows → [{ head, rows, amount }] per head, first seen first. */
+function headsOf(rows) {
+  const heads = [];
+  for (const r of rows) {
+    let h = heads.find((x) => x.head === r.head);
+    if (!h) heads.push((h = { head: r.head, rows: 0, amount: 0 }));
+    h.rows += 1;
+    h.amount = round2(h.amount + r.amount);
+  }
+  return heads;
 }
 
 /** Rows dated after `last` → the warning naming the first few, or null. */
@@ -519,6 +525,38 @@ function lateRows(rows, last, what) {
 }
 
 // ── the SPDCL rows ───────────────────────────────────────────────────────
+
+/**
+ * Consultation Charges: one row per doctor, Qty = the visits, dated the first
+ * visit (the client, 2026-11-13). A doctor billed at two rates gets a row per
+ * rate, so Rate × Qty — the sheet's own formula — stays the bill's amount.
+ * Every other head keeps its row a day.
+ */
+function oneRowPerDoctor(rows) {
+  const out = [];
+  const byDoctor = new Map();
+  for (const r of rows) {
+    if (r.head !== HEAD.consultation) {
+      out.push(r);
+      continue;
+    }
+    const key = `${r.code ?? ''}|${label(r.description).toUpperCase()}|${r.rate}`;
+    const first = byDoctor.get(key);
+    if (!first) {
+      const row = { ...r };
+      byDoctor.set(key, row);
+      out.push(row);
+      continue;
+    }
+    first.qty = round2(first.qty + r.qty);
+    first.amount = round2(first.rate * first.qty);
+    if (r.day != null && (first.day == null || r.day < first.day)) {
+      first.day = r.day;
+      first.date = r.date;
+    }
+  }
+  return out;
+}
 
 /**
  * final: parseFinalBill(); pharmacy: parsePharmacyBill() or null.
@@ -535,8 +573,10 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
   if (pharmacy?.items.some((i) => !Number.isInteger(i.qty))) {
     add('warning', 'Some pharmacy quantities are not whole numbers — SPDCL\'s sheet shows quantities without decimals; check those rows');
   }
+  // Checked on the rows a day, before a doctor's visits join into one row.
   const late = lateRows(sheet.rows, sheet.latest, `the last date on the bills (${dateText(sheet.latest)})`);
   if (late) add('warning', `${late} — check the admission date and those rows`);
+  const rows = oneRowPerDoctor(sheet.rows);
 
   return {
     patient: sheet.patient,
@@ -545,8 +585,8 @@ function buildSpdclSheet({ final, pharmacy = null, admissionDate = null, tariffT
     admissionAssumed: sheet.assumed,
     lastDate: dateText(sheet.latest),
     stayDays: sheet.stayDays,
-    rows: sheet.rows.map(({ day, ...r }) => r),
-    heads: sheet.heads,
+    rows: rows.map(({ day, ...r }) => r),
+    heads: headsOf(rows),
     totals: sheet.totals,
     checks,
   };

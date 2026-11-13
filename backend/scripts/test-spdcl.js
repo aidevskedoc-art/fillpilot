@@ -106,8 +106,8 @@ check('ICU days first, from admission', by(sheet, 'ICU BED CHARGE').map((r) => [
 check('room rent after the ICU days', by(sheet, 'ROOM RENT').map((r) => [r.head, r.date, r.rate, r.qty]), [
   [HEAD.room, '03/01/2026', 2000, 1], [HEAD.room, '04/01/2026', 2000, 1],
 ]);
-check('doctor visits: a row a day from admission', by(sheet, 'DOCTOR ONE').map((r) => [r.head, r.date, r.qty, r.code]), [
-  [HEAD.consultation, '01/01/2026', 1, null], [HEAD.consultation, '02/01/2026', 1, null], [HEAD.consultation, '03/01/2026', 1, null],
+check('doctor visits: one row per doctor, Qty = the visits, dated from admission', by(sheet, 'DOCTOR ONE').map((r) => [r.head, r.date, r.rate, r.qty, r.amount, r.code]), [
+  [HEAD.consultation, '01/01/2026', 350, 3, 1050, null],
 ]);
 check('N Time(s) spread over the stay, remainder first (9 over 4 days)', by(sheet, 'RBS WITH GLUCOMETER').map((r) => [r.date, r.qty, r.amount]), [
   ['01/01/2026', 3, 120], ['02/01/2026', 2, 80], ['03/01/2026', 2, 80], ['04/01/2026', 2, 80],
@@ -129,8 +129,26 @@ check('totals: the rounding gap is explained, nothing else to check', [sheet.tot
 ]);
 checkTrue('the rounding note names the cause', sheet.checks.some((c) => /rounded to paise/.test(c.message)));
 check('heads: rows and amount per head, first seen first', sheet.heads.map((h) => [h.head, h.rows, h.amount]), [
-  [HEAD.room, 2, 4000], [HEAD.icu, 2, 10000], ['Emergency  ', 1, 900], [HEAD.investigations, 7, 1010], [HEAD.consultation, 3, 1050], [HEAD.pharmacy, 2, 292.23],
+  [HEAD.room, 2, 4000], [HEAD.icu, 2, 10000], ['Emergency  ', 1, 900], [HEAD.investigations, 7, 1010], [HEAD.consultation, 1, 1050], [HEAD.pharmacy, 2, 292.23],
 ]);
+
+// ── doctors: a row per doctor (the client, 2026-11-13) ─────────────────
+const visits = build({ final: finalRows({ grand: 18802.25, extra: [
+  F('9. CONSULTATION CHARGES'),
+  F('03/01/2026', null, 'DOCTOR TWO', null, null, null, null, 350),
+  F('02/01/2026', null, 'DOCTOR TWO', null, null, null, null, 350),
+  F('04/01/2026', null, 'DOCTOR TWO', null, null, null, null, 500),
+  F('05/01/2026', null, 'DOCTOR  ONE', null, null, null, null, 350),
+  sub(1550),
+] }) });
+check('doctors: visits join per doctor and rate, dated the first visit, Amount = Rate × Qty', pick(visits, (r) => r.head === HEAD.consultation).map((r) => [r.description, r.date, r.rate, r.qty, r.amount]), [
+  ['DOCTOR ONE', '01/01/2026', 350, 4, 1400],
+  ['DOCTOR TWO', '02/01/2026', 350, 2, 700],
+  ['DOCTOR TWO', '04/01/2026', 500, 1, 500],
+]);
+check('doctors: the Excel total still matches the bill', [visits.totals.excel, visits.totals.difference, visits.checks.map((c) => c.level)], [18802.23, 0.02, ['info', 'info']]);
+check('doctors: the head counts the joined rows', visits.heads.find((h) => h.head === HEAD.consultation), { head: HEAD.consultation, rows: 3, amount: 2600 });
+check('doctors: other heads keep a row a day', by(visits, 'E C G').length, 2);
 
 // ── the person's admission date ─────────────────────────────────────────
 const earlier = build({ admissionDate: '31/12/2025' });
