@@ -147,8 +147,9 @@ checkTrue('… and the rows made PACKAGE by date are counted', sheet.checks.some
 const bare = build({ dischargeDate: null, surgeryDate: null });
 check('no surgery date: surgery and implant rows without a date, still PACKAGE; nothing else PACKAGE',
   [bare.surgeryDate, bare.rows.filter((r) => r.packageType === PACKAGE).map((r) => [r.head, r.date])], [null, [[HEAD.surgery, null], [HEAD.implants, null]]]);
-checkTrue('… and both dates asked for', bare.checks.some((c) => c.level === 'warning' && /Enter the date of surgery/.test(c.message))
-  && bare.checks.some((c) => c.level === 'warning' && /Enter the date of discharge/.test(c.message)));
+checkTrue('… and both dates said to be optional, not asked for', bare.checks.some((c) => c.level === 'info' && /No date of surgery \(optional\)/.test(c.message))
+  && bare.checks.some((c) => c.level === 'info' && /No date of discharge \(optional\)/.test(c.message))
+  && !bare.checks.some((c) => c.level === 'warning' && /date of (surgery|discharge)/i.test(c.message)));
 const dated = build({ final: finalRows({ surgeryDate: '03/01/2026' }), surgeryDate: null });
 check('surgery date taken from a dated surgery line, said so', [dated.surgeryDate, dated.surgeryAssumed, by(dated, 'COST OF IMPLANTS')[0].date], ['03.01.2026', true, '03.01.2026']);
 checkTrue('… as an info line', dated.checks.some((c) => c.level === 'info' && /Date of surgery taken as 03\.01\.2026/.test(c.message)));
@@ -177,12 +178,15 @@ check('file: every row as built — S.No., tariff, package, head, code (digits a
 check('file: the date box', [3, 4, 5].map((r) => back.rows[r].slice(12, 14)), [
   ['Date of Admission', '01.01.2026'], ['Date of Discharge', '06.01.2026'], ['Date of surgery/Procedure', '03.01.2026'],
 ]);
-check('file: after the last row, only the template\'s S.No. and empty Amounts', back.rows.slice(sheet.rows.length + 1, 566).every((r, i) => r[0] === sheet.rows.length + i + 1 && r.slice(1, 9).every((v) => v == null) && r[9] === 0), true);
+// The client, 2026-11-13: no S.No. and no 0.00 on the template's rows below the bill.
+check('file: after the last row, the template\'s rows are empty — no S.No., no 0.00 Amount', back.rows.slice(sheet.rows.length + 1, 1001).every((r) => (r || []).slice(0, 10).every((v) => v == null)), true);
 check('file: the dropdown lists stay (Excel rows 20001–20013)', [back.rows[20000].slice(12, 15), back.rows[20012][14]], [['CGHS NABH', 'PACKAGE', 'CONSULTATION'], 'OTHERS']);
 const zip = openZip(file);
 const xml = zip.text('xl/worksheets/sheet1.xml');
-// Row 2 the first room-rent day (3000), row 4 the blood transfusion (713, the template's shared formula).
-checkTrue('file: Amount is the template\'s formula, its own value cached', xml.includes('<c r="J2" s="42"><f>+H2*I2</f><v>3000</v></c>') && /<c r="J4" s="42"><f t="shared" si="0"\/><v>713<\/v><\/c>/.test(xml));
+// Row 2 the first room-rent day (3000), row 4 the blood transfusion (713, a shared formula in the template).
+checkTrue('file: Amount is the template\'s formula written out on every row, its own value cached; no shared formula left',
+  xml.includes('<c r="J2" s="42"><f>+H2*I2</f><v>3000</v></c>') && xml.includes('<c r="J4" s="42"><f>+H4*I4</f><v>713</v></c>') && !xml.includes('t="shared"'));
+checkTrue('file: the emptied rows keep their borders (styles)', /<c r="A600" s="\d+"\/>/.test(xml) && /<c r="J500" s="\d+"\/>/.test(xml));
 checkTrue('file: the Instructions and Example Bill sheets are kept', zip.names.includes('xl/worksheets/sheet2.xml') && zip.names.includes('xl/worksheets/sheet3.xml')
   && /<sheet name="Instructions"/.test(zip.text('xl/workbook.xml')));
 checkTrue('file: text with double spaces keeps them', writeTgTranscoWorkbook({ ...sheet, rows: [{ ...sheet.rows[0], description: 'HEPATITIS B SURFACE  ANTIGEN' }] }).length > 0

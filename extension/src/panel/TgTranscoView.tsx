@@ -1,10 +1,10 @@
 // TG Transco Excel, on the panel's "Excel & PDF" tab: TG Transco takes a bill as
 // its own Excel template, filled. Choose the HIS final bill and pharmacy bill
 // Excel files; the server turns them into that file (backend/src/claims/tgtransco.js),
-// as the billing team fills it. The person adds the dates the bills do not have
-// (discharge, surgery), checks it here, saves it and sends it to TG Transco.
-// Download waits for those dates: TG Transco wants a Service Date on every surgery
-// and implant row, and the three dates in its box.
+// as the billing team fills it. The person may add the dates the bills do not have
+// (discharge, surgery — optional, the client 2026-11-13), checks it here, saves it
+// and sends it to TG Transco. Download waits only for the date of admission, which
+// the bills nearly always give.
 //
 // It does not touch any website. The files and the result live in this view
 // only — clearing it, choosing other files or closing the panel drops them.
@@ -31,17 +31,14 @@ const ON_SURGERY_DATE = new Set(['SURGERY CHARGES', 'IMPLANTS/MEDICAL APPLIANCES
 const joined = (parts: string[]) => (parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0] ?? '');
 
 /**
- * The dates TG Transco needs that the file does not have yet. Its Instructions sheet:
- * Service Dates are mandatory for surgery and implants, and the box wants the dates
- * of admission, discharge and surgery (if any). The bills give none of discharge and surgery.
+ * needed: the dates Download waits for — admission only. Discharge and surgery are
+ * optional (the client, 2026-11-13); the bills give neither. undated: the surgery and
+ * implant rows left without a Service Date while there is no date of surgery.
  */
 function datesNeeded(sheet: TgTranscoSheet | null) {
   if (!sheet) return { needed: [] as DateKey[], undated: 0 };
-  const undated = sheet.rows.filter((r) => r.date == null && ON_SURGERY_DATE.has(r.head)).length;
-  const needed: DateKey[] = [];
-  if (!sheet.admissionDate) needed.push('admission');
-  if (!sheet.dischargeDate) needed.push('discharge');
-  if (!sheet.surgeryDate && undated > 0) needed.push('surgery');
+  const undated = sheet.surgeryDate ? 0 : sheet.rows.filter((r) => r.date == null && ON_SURGERY_DATE.has(r.head)).length;
+  const needed: DateKey[] = sheet.admissionDate ? [] : ['admission'];
   return { needed, undated };
 }
 
@@ -202,8 +199,8 @@ export function TgTranscoView({ onError }: { onError: (message: string) => void 
 
             <div className="spdcl-options mt">
               {dateField('admission', 'Date of admission')}
-              {dateField('discharge', 'Date of discharge')}
-              {dateField('surgery', 'Date of surgery')}
+              {dateField('discharge', 'Date of discharge (optional)')}
+              {dateField('surgery', 'Date of surgery/procedure (optional)')}
               <label className="field">
                 Tariff type
                 <select className="input input-sm" value={tariff} disabled={busy} onChange={(e) => changeTariff(e.target.value as TgTranscoTariff)}>
@@ -213,13 +210,11 @@ export function TgTranscoView({ onError }: { onError: (message: string) => void 
             </div>
             {needed.length > 0 && (
               <div className="msg msg-warn mt-sm">
-                <span>
-                  Enter the {joined(needed.map((k) => LABEL[k]))} above — the HIS bills do not have {needed.length > 1 ? 'them' : 'it'}.
-                  {needed.includes('surgery') && ` Until then the ${undated} surgery and implant row(s) have no Service Date, which TG Transco requires.`}
-                </span>
+                <span>Enter the {joined(needed.map((k) => LABEL[k]))} above — the HIS bills do not have {needed.length > 1 ? 'them' : 'it'}.</span>
               </div>
             )}
             <div className="muted small mt-sm">
+              {undated > 0 ? `Without a date of surgery, the ${undated} surgery and implant row(s) have no Service Date. ` : ''}
               {sheet.admissionAssumed ? 'Admission is the earliest date on the bills. ' : ''}
               Surgery and implants go on the date of surgery, and rows from that date are PACKAGE.
             </div>

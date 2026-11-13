@@ -153,8 +153,9 @@ function buildTgTranscoSheet({ final, pharmacy = null, admissionDate = null, dis
   if (pharmacy?.items.some((i) => i.returned)) {
     add('info', `The pharmacy bill has returns (${daily.pharmacyReturned}) — entered under "${HEAD.pharmacyReturns}" as positive amounts, as TG Transco's instructions say, and taken off the total`);
   }
+  // Discharge and surgery dates are optional (the client, 2026-11-13): said, not asked for.
   if (rows.some((r) => PACKAGED.has(r.head)) && surgery == null) {
-    add('warning', 'Enter the date of surgery — TG Transco wants a date on the surgery and implant rows, and the bills do not give it');
+    add('info', 'No date of surgery (optional) — the surgery and implant rows are left without a Service Date');
   } else if (surgeryAssumed) {
     add('info', `Date of surgery taken as ${fileDate(surgery)}, the date on the bill's surgery lines. Change it above if it is wrong.`);
   }
@@ -162,7 +163,7 @@ function buildTgTranscoSheet({ final, pharmacy = null, admissionDate = null, dis
     add('warning', `The date of surgery ${fileDate(surgery)} is before the admission date ${fileDate(admission)} — check it`);
   }
   if (discharge == null) {
-    add('warning', 'Enter the date of discharge — TG Transco asks for it, and the bills do not give it');
+    add('info', 'No date of discharge (optional) — left empty in the dates box');
   } else {
     if (admission != null && discharge < admission) add('warning', `The date of discharge ${fileDate(discharge)} is before the admission date ${fileDate(admission)} — check it`);
     if (surgery != null && surgery > discharge) add('warning', `The date of surgery ${fileDate(surgery)} is after the date of discharge ${fileDate(discharge)} — check it`);

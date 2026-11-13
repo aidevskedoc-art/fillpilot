@@ -255,13 +255,31 @@ function codeFamily(rawCodes) {
   return marked > packaged ? 'nims' : 'package';
 }
 
-/** "2 Visit(s) x 350.00", "1 Time ( s ) x 75.00", "2 X 450.00" → { qty, unit, rate } */
+/**
+ * "2 Visit(s) x 350.00", "1 Time ( s ) x 75.00", "2 X 450.00", "1.5 Day(s) X 3,000.00" → { qty, unit, rate }.
+ * A count can have a fraction (half a day): "1.5" must not be read as its "5".
+ */
 function parseQuantity(text) {
   const t = text || '';
-  const m = /(\d+)\s*([A-Za-z]+)\s*\(\s*s\s*\)\s*(?:[xX×]\s*([\dIlOo,.]+))?/.exec(t)
-    || /(\d+)()\s*[xX×]\s*([\dIlOo,.]+)/.exec(t);
+  const m = /(\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*\(\s*s\s*\)\s*(?:[xX×]\s*([\dIlOo,.]+))?/.exec(t)
+    || /(\d+(?:\.\d+)?)()\s*[xX×]\s*([\dIlOo,.]+)/.exec(t);
   if (!m) return {};
   return { qty: Number(m[1]), unit: m[2] || null, rate: m[3] ? parseAmount(m[3]) : null };
+}
+
+/** "PACKED CELLS 3 Unit(s) X 530.00": a count at the end of the item's name. */
+const COUNT_IN_NAME = /(?:^|\s+)(\d+(?:\.\d+)?\s*[A-Za-z]+\s*\(\s*s\s*\)(?:\s*[xX×]\s*[\dIlOo,.]+)?)$/;
+
+/**
+ * A count printed (or scanned) a little left of the value column lands in the
+ * item's name, and the count would quietly become 1: it is taken back out of
+ * the name, ahead of whatever the value column holds ("X 530.00").
+ */
+function countFromName(row) {
+  if (!row.desc || parseQuantity(row.value).qty != null) return row;
+  const m = COUNT_IN_NAME.exec(row.desc);
+  if (!m) return row;
+  return { ...row, desc: row.desc.slice(0, m.index).trim(), value: `${m[1]} ${row.value || ''}`.trim() };
 }
 
 const isPunctuationOnly = (text) => /^[\s\-–.,:;'"`_|]*$/.test(text);
@@ -464,7 +482,7 @@ function parseFinalBill(pages) {
     // Doctor lines are names, which hold no digits.
     const names = /DOCTOR|CONSULTATION/i.test(s.name);
     for (const g of s.groups) {
-      const anchors = g.rows.filter((r) => r.kind === 'anchor').map((r) => ({ ...r, parts: r.desc ? [{ pos: r.pos, text: r.desc }] : [] }));
+      const anchors = g.rows.filter((r) => r.kind === 'anchor').map(countFromName).map((r) => ({ ...r, parts: r.desc ? [{ pos: r.pos, text: r.desc }] : [] }));
       for (const t of g.rows.filter((r) => r.kind === 'text')) {
         if (!anchors.length) continue;
         // "CHLORIDE)" / "MONITORING)" close a bracket opened above — they end the item above.
@@ -537,7 +555,9 @@ function parseFinalBill(pages) {
       delete g.rows;
       delete g.closed;
       delete g.subTotalPage;
+      const subTotalPrinted = g.subTotal != null;
       reconcileGroup(s, g, issues, page);
+      if (subTotalPrinted) settleCounts(g);
       computedTotal += g.subTotal ?? sum(g.items.map((i) => i.amount));
     }
   }
@@ -686,6 +706,31 @@ function reconcileGroup(section, g, issues, page = null) {
   }
   if (missing.length > 1) {
     issues.push({ level: 'error', message: `${where}: ${missing.length} amounts could not be read`, page: missing[0].page ?? page });
+  }
+}
+
+/**
+ * A count misread while its amount is right: "2 Unit(s) X 530.00 … 1,590.00"
+ * on a bill that says 3 (Somajiguda, 2026-11-12). The amounts are checked
+ * against the printed sub total (and later the grand total and the summary
+ * bill); the count is read once. So when the group adds up, the count is
+ * amount ÷ rate — a whole number, or a half for days and hours — with the same
+ * number of digits as the count read: one digit misread (2 for 3), not a rate
+ * that lost a digit (53 for 530 would make 3 into 30). Marked for a person to check.
+ */
+function settleCounts(g) {
+  if (!sameAmount(sum(g.items.map((i) => i.amount ?? 0)), g.subTotal)) return;
+  const digits = (n) => String(n).replace(/\D/g, '').length;
+  for (const it of g.items) {
+    if (!it.rate || it.amount == null || it.corrected || it.baseRate != null) continue;
+    if (sameAmount(round2(it.qty * it.rate), it.amount)) continue;
+    const count = round2(it.amount / it.rate);
+    const halves = /^(day|hour|hr)/i.test(it.unit || '');
+    if (!(count > 0) || !Number.isInteger(halves ? count * 2 : count) || digits(count) !== digits(it.qty)) continue;
+    const read = it.qty;
+    it.issues = it.issues.filter((m) => !m.startsWith(`${read} × ${it.rate} = `));
+    it.issues.push(`Quantity read as ${read}, but ${it.amount} ÷ ${it.rate} = ${count} and the sub total agrees — ${count} used; check it on the bill`);
+    it.qty = count;
   }
 }
 

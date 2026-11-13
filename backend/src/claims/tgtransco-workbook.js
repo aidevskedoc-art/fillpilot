@@ -1,10 +1,12 @@
 // The TG Transco bill file: TG Transco's own blank template (tgtransco-template.xlsx,
 // no patient data) with its "Test" sheet filled. Everything else stays as the
 // template has it: the Instructions and Example Bill sheets, the dropdown lists
-// (Test!M20001:O20013) and their validations, every cell's style, and the
-// Amount formula (=+H*I) of the template's rows. Rows are filled from row 2 in the
-// template's own cells; S.No. (column A) is the template's. The admission,
-// discharge and surgery dates go in its box (N4:N6).
+// (Test!M20001:O20013) and their validations, and every cell's style. Rows are
+// filled from row 2 in the template's own cells, each with the Amount formula
+// (=+H*I). The template's rows below the bill are emptied: it numbers 1000 rows
+// (S.No.) and gives 565 of them the Amount formula, which showed 0.00 on every
+// empty row (the client, 2026-11-13). The admission, discharge and surgery dates
+// go in its box (N4:N6).
 const fs = require('fs');
 const path = require('path');
 const { openZip, writeZip, sharedStrings, escapeXml } = require('./xlsx');
@@ -109,8 +111,9 @@ function writeTgTranscoWorkbook(sheet) {
     const own = rows.get(r);
     const cells = new Map(cellsOf(own || '').map((c) => [c.col, c]));
     const style = (col) => (r <= t.lastFormulaRow ? cells.get(col)?.style : t.pattern.get(col)) ?? t.pattern.get(col) ?? null;
-    // The template's own formula (often a shared one), or the same formula written out.
-    const formula = /<f\b[^>]*\/>|<f\b[^>]*>[\s\S]*?<\/f>/.exec(cells.get('J')?.inner || '')?.[0] ?? `<f>+H${r}*I${r}</f>`;
+    // Written out on every row: the template's formulas are shared in blocks of rows
+    // (J3:J34 …), and a block's first row would claim the emptied rows below the bill.
+    const formula = `<f>+H${r}*I${r}</f>`;
     const code = data.code == null ? null : String(data.code);
     const out = [
       cell(`A${r}`, style('A'), `<v>${r - 1}</v>`),
@@ -130,6 +133,14 @@ function writeTgTranscoWorkbook(sheet) {
     const open = own ? /^<row\b[^>]*?(?=\/?>)/.exec(own)[0] : `<row r="${r}" spans="1:10"`;
     rows.set(r, `${open}>${out.join('')}</row>`);
   });
+
+  // The template's rows below the bill: S.No. and the Amount formula (0.00) taken
+  // out of columns A–J, each cell's style (its borders) kept. A self-closing cell
+  // (<c r="B68" s="6"/>) is empty already; the date box (M, N) is not touched.
+  for (const [r, xml] of rows) {
+    if (r <= lastRow || r >= t.listHead - 1) continue;
+    rows.set(r, xml.replace(/<c r="([A-J])(\d+)"([^>/]*)>[\s\S]*?<\/c>/g, (m, col, n, attrs) => `<c r="${col}${n}"${attrs.replace(/\st="[^"]*"/, '')}/>`));
+  }
 
   // The date box: Date of Admission, Discharge, surgery/Procedure.
   const dates = { admission: sheet.admissionDate, discharge: sheet.dischargeDate, surgery: sheet.surgeryDate };

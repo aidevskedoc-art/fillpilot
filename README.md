@@ -200,11 +200,11 @@ differs from the hand-made file.
 TG Transco takes a bill as its own Excel template, filled, sent with the bill
 documents (their **Instructions** sheet says how). In the panel's **Excel & PDF**
 tab choose **TG Transco Excel**, drop the same two HIS exports, enter the
-**date of discharge** and **date of surgery** (the bills do not have them), check
-the result and press **Download TG Transco Excel**. The file is named
-`<IP> - TG TRANSCO.xlsx`, as the team names it. Download waits until those dates
-are in (the date of surgery only when the bill has surgery or implants): without
-them the surgery and implant rows have no Service Date, which TG Transco requires.
+**date of discharge** and **date of surgery/procedure** if known (both optional —
+the bills do not have them), check the result and press **Download TG Transco
+Excel**. The file is named `<IP> - TG TRANSCO.xlsx`, as the team names it. Download
+waits only for the date of admission, which the bills nearly always give. Without a
+date of surgery the surgery and implant rows have no Service Date; the panel says so.
 
 - The file is TG Transco's own blank template (`backend/src/claims/tgtransco-template.xlsx`)
   with its **Test** sheet filled in the template's own cells: S.No., TARIFF_TYPE

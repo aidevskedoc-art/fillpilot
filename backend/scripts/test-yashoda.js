@@ -98,6 +98,28 @@ check('quantity OCR-spoilt is not parsed (the bill reader then uses amount ÷ ra
   const unreadable = parseFinalBill(page('2O Time(s) X 4?.00')).sections[0].groups[0].items[0];
   check('quantity unreadable, no rate: 1 assumed, flagged', [unreadable.qty, unreadable.issues.some((m) => /1 assumed/.test(m))], [1, true]);
 
+  // Somajiguda, 2026-11-12: "3 Unit(s) X 530.00 … 1,590.00" came out as qty 2.
+  // qtyX: where the count starts (of 600); subTotal: the printed sub total.
+  const line = (valueText, amount, { qtyX = 300, subTotal = amount, name = 'PACKED RED BLOOD CELLS' } = {}) => parseFinalBill([{ page: 1, width: 600, lines: [
+    L(800, [10, 'Name : MR. TEST'], [480, 'IP No: 1']),
+    L(760, [10, '1. BLOOD BANK']),
+    L(740, [50, name], [qtyX, valueText], [420, 'LB012'], [510, amount]),
+    L(720, [370, 'Sub Total...'], [510, subTotal]),
+    L(700, [370, 'Grand Total...'], [510, subTotal]),
+  ] }]).sections[0].groups[0].items[0];
+  const misread = line('2 Unit(s) X 530.00', '1,590.00');
+  check('count misread (2 for 3), amount agrees with the sub total: amount ÷ rate used, flagged',
+    [misread.qty, misread.issues.some((m) => /read as 2, but 1590 ÷ 530 = 3/.test(m)), misread.issues.some((m) => /^2 × 530/.test(m))], [3, true, false]);
+  check('count misread but the sub total disagrees: count kept, mismatch flagged', [line('2 Unit(s) X 530.00', '1,590.00', { subTotal: '1,060.00' }).qty], [2]);
+  check('rate that lost a digit (53 for 530) does not turn 3 into 30', [line('3 Unit(s) X 53.00', '1,590.00').qty], [3]);
+  check('half counts: 1.5 and 0.5 days, not 5', [parseQuantity('1.5 Day(s) X 3,000.00').qty, line('0.5 Day(s) X 3,000.00', '1,500.00').qty, line('1.5 Day(s) X 3,000.00', '4,500.00').qty], [1.5, 0.5, 1.5]);
+  check('day count with its point lost (15 for 1.5): amount ÷ rate = 1.5', [line('15 Day(s) X 3,000.00', '4,500.00').qty], [1.5]);
+  const leftCount = line('3 Unit(s) X 530.00', '1,590.00', { qtyX: 230 });
+  check('count printed left of the value column: taken out of the name, not 1', [leftCount.qty, leftCount.rate, leftCount.description, leftCount.issues], [3, 530, 'PACKED RED BLOOD CELLS', []]);
+  const halfLeft = line('X 530.00', '1,590.00', { name: 'PACKED RED BLOOD CELLS 3 Unit(s)' });
+  check('count in the name, rate in the value column: joined', [halfLeft.qty, halfLeft.rate, halfLeft.description], [3, 530, 'PACKED RED BLOOD CELLS']);
+  check('a name that only looks like a count is kept', [line('1 Time(s) X 530.00', '530.00', { name: 'BLOOD IRRADIATION (1 UNIT)' }).description], ['BLOOD IRRADIATION (1 UNIT)']);
+
   const ownLine = [{ page: 1, width: 600, lines: [
     L(800, [10, 'Name : MR. TEST'], [480, 'IP No: 1']),
     L(760, [10, '1. LABORATORY']),
@@ -636,6 +658,18 @@ const oxygenTg = buildTgnpdclClaim({ final: finalBill([section('OXYGEN', [['OXYG
 ], 13860]])], 13860) });
 check('tgnpdcl: oxygen without a code → 2225/COMM in hours (4 days = 96); a printed code kept', oxygenTg.tabs.investigations.items.map((r) => [r.code, r.tariff, r.qty, r.amountClaimed, r.manual]),
   [['2225', 'COMM', 96, 12960, false], ['584', 'COMM', 1, 900, false]]);
+// Somajiguda, 2026-11-12: one item on 3 lines, 2 entered — the third line's code came out spoilt.
+const prbc = (code, tariff) => ({ ...coded('PACKED RED BLOOD CELLS', code, 1, 530), tariff });
+const threeLines = (third, extra = []) => buildTgnpdclClaim({ final: finalBill([section('BLOOD BANK', [['BLOOD BANK', [prbc('41A', 'NIMS'), prbc('41A', 'NIMS'), third, ...extra], 1590]])], 1590) })
+  .tabs.investigations.items.map((r) => [r.code, r.tariff, r.qty, r.amountClaimed, r.manual, r.review]);
+check('tgnpdcl: a line without its mark joins the same code\'s lines (not typed over them on the site)', threeLines(prbc('41A', null)), [['41A', 'NIMS', 3, 1590, false, true]]);
+check('tgnpdcl: a line whose code is not a code joins the same item at the same rate', threeLines(prbc('4?A', null)), [['41A', 'NIMS', 3, 1590, false, true]]);
+check('tgnpdcl: a line with no code joins the same item at the same rate', threeLines(prbc(null, null)), [['41A', 'NIMS', 3, 1590, false, true]]);
+check('tgnpdcl: same name at another rate is not joined', threeLines({ ...coded('PACKED RED BLOOD CELLS', null, 1, 600), tariff: null }),
+  [['41A', 'NIMS', 2, 1060, false, false], [null, null, 1, 600, true, true]]);
+check('tgnpdcl: the same item under two codes — a line without a code is left for the person',
+  threeLines(prbc(null, null), [{ ...coded('PACKED RED BLOOD CELLS', '584', 1, 530), tariff: 'COMM' }]),
+  [['41A', 'NIMS', 2, 1060, false, false], [null, null, 1, 530, true, true], ['584', 'COMM', 1, 530, false, false]]);
 
 checkTrue('cil: other company flagged', buildCilClaim({ final: finalBill([], 0), summary: { invoiceNo: 'X', patient: { company: 'NORTHERN POWER' }, categories: [], totals: { gross: 0 }, issues: [] } })
   .checks.some((c) => /not Coal India/.test(c.message)));

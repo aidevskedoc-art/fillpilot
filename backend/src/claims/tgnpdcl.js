@@ -360,6 +360,7 @@ function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
       }
     }
   }
+  joinRepeatedLines(investigations.items);
   investigations.items = mergeByCode(investigations.items);
   // A reading that is another line's code on this bill is not an alternative: both items are on the bill.
   const billCodes = new Set(investigations.items.map((r) => r.code).filter(Boolean));
@@ -438,6 +439,53 @@ function buildTgnpdclClaim({ final, summary, pharmacy: pharmacyBill }) {
     },
     checks,
   };
+}
+
+/**
+ * One item on several lines of the bill is one code. A line whose code the
+ * scan spoilt became a row of its own, so the item came out short (Somajiguda,
+ * 2026-11-12: 3 units on the bill, 2 entered):
+ *   - no code read, or not a code: left for manual entry. It takes the code and
+ *     mark of the other lines with the same name at the same rate, when they
+ *     all carry one.
+ *   - the code without its NIMS / COMM mark: a row of its own, which on the site
+ *     typed its quantity over the other lines' row (same Code column). It takes
+ *     the mark that code carries on the bill's other lines, when it has one.
+ * Combined codes ("R171+171") are left as they are. Rows changed are marked to check.
+ */
+function joinRepeatedLines(rows) {
+  const rateOf = (r) => (r.amountClaimed != null && r.qty ? round2(r.amountClaimed / r.qty) : null);
+  const itemKey = (r) => `${normLabel(r.description)}|${rateOf(r)}`;
+  const marked = rows.filter((r) => r.code && !r.manual && r.tariff);
+  /** name + rate → the code|mark pairs its marked lines carry */
+  const byItem = new Map();
+  /** code → the marks it carries */
+  const marksOf = new Map();
+  for (const r of marked) {
+    if (!byItem.has(itemKey(r))) byItem.set(itemKey(r), new Map());
+    const pairs = byItem.get(itemKey(r));
+    const pair = `${r.code}|${r.tariff}`;
+    pairs.set(pair, { code: r.code, tariff: r.tariff, lines: (pairs.get(pair)?.lines || 0) + 1 });
+    if (!marksOf.has(r.code)) marksOf.set(r.code, new Set());
+    marksOf.get(r.code).add(r.tariff);
+  }
+  for (const r of rows) {
+    if (r.code?.includes('+')) continue;
+    if (!r.code || r.manual) {
+      const pairs = rateOf(r) == null ? null : byItem.get(itemKey(r));
+      if (!pairs || pairs.size !== 1) continue;
+      const [{ code, tariff, lines }] = pairs.values();
+      const read = r.code ? `the code read as "${r.code}"` : 'no code read';
+      r.notes = r.notes.filter((n) => !/pick the tariff item manually|is not a tariff code — enter manually/.test(n));
+      r.notes.push(`One line had ${read}; the same item at the same rate is ${code}/${tariff} on ${lines} other line(s), so it is entered with them — check it on the bill`);
+      Object.assign(r, { code, tariff, manual: false, review: true });
+      delete r.alternatives;
+    } else if (!r.tariff && marksOf.get(r.code)?.size === 1) {
+      const [tariff] = marksOf.get(r.code);
+      r.notes.push(`${r.code} is printed without its mark on one line; it is ${r.code}/${tariff} on the bill's other lines, so it is entered with them — check it on the bill`);
+      Object.assign(r, { tariff, review: true });
+    }
+  }
 }
 
 /**
